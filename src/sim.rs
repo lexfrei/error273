@@ -181,9 +181,14 @@ pub const BUILD_RESERVE_SHARE: f32 = 1.5;
 // Past a handful of huts the grounds are as well worked as they are going to
 // be; more sheds do not dress a carcass any faster.
 pub const USEFUL_HUTS: usize = 3;
-// How much of the colony can be mouths that do not yet work. A stock of food
-// says nothing about whether there are hands to fetch the next one.
-pub const MAX_DEPENDENT_SHARE: f32 = 0.12;
+// The share of a colony that is children when it merely replaces itself is the
+// share of a life spent as one: a child holds a dependent's place for
+// ADULT_AGE of a LIFESPAN_BASE life. INVARIANT: a cap below this guarantees
+// extinction, however healthy the colony looks, because births can never keep
+// up with deaths. The slack above it is the only room a colony has to grow.
+pub const REPLACEMENT_DEPENDENT_SHARE: f32 = ADULT_AGE / LIFESPAN_BASE;
+pub const DEPENDENT_SLACK: f32 = 1.2;
+pub const MAX_DEPENDENT_SHARE: f32 = REPLACEMENT_DEPENDENT_SHARE * DEPENDENT_SLACK;
 // Hysteresis on the colony's wood policy: only a comfortable stock is diverted
 // to a building site, and a project is not abandoned the moment it dips.
 pub const FUEL_SPARE_HIGH: u32 = 58;
@@ -3031,5 +3036,25 @@ mod tests {
             !has_hands_to_spare(0, 0),
             "an empty colony has no hands at all"
         );
+    }
+
+    #[test]
+    fn a_colony_of_any_size_may_carry_the_children_that_replace_it() {
+        for population in [8usize, 20, 35, 60, 120] {
+            let replacement = (population as f32 * REPLACEMENT_DEPENDENT_SHARE).round() as usize;
+            assert!(
+                has_hands_to_spare(replacement, population),
+                "a colony of {population} cannot carry even the {replacement} children that \
+                 would replace it, so it is dying on a schedule"
+            );
+        }
+    }
+
+    #[test]
+    fn a_colony_carrying_more_than_the_slack_allows_stops_having_children() {
+        let population = 100;
+        let ceiling = (population as f32 * MAX_DEPENDENT_SHARE) as usize;
+        assert!(has_hands_to_spare(ceiling, population));
+        assert!(!has_hands_to_spare(ceiling + 2, population));
     }
 }
