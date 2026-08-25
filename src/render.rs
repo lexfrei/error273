@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 
 use crate::sim::{
-    BUILDINGS, Ballot, Building, CENTER, Calendar, Cargo, Citizen, Construction, NeedKind, Pos, R,
-    Stores, Structure, Tick,
+    ADULT_AGE, BUILDINGS, Ballot, Building, CENTER, Calendar, Cargo, Citizen, Construction,
+    FRAILTY_ONSET, NeedKind, Pos, R, Stores, Structure, Tick, couples, is_adult,
 };
 
 pub fn clear_screen() {
@@ -101,6 +101,18 @@ pub fn render(
         counts.join("  "),
         project,
         votes.join("/")
+    ));
+    let ages: Vec<f32> = citizens.iter().map(|(_, citizen)| citizen.age).collect();
+    let children = ages.iter().filter(|age| !is_adult(**age)).count();
+    let frail = ages.iter().filter(|age| **age > FRAILTY_ONSET).count();
+    out.push_str(&format!(
+        "under {:<2} {:3}  grown {:3}  over {:<2} {:3}  couples {:3}\n",
+        ADULT_AGE as u32,
+        children,
+        alive - children - frail,
+        FRAILTY_ONSET as u32,
+        frail,
+        couples(&ages)
     ));
     print!("{out}");
 

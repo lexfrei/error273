@@ -31,6 +31,10 @@ pub const fn per_day(rate: f32) -> f32 {
     rate / ticks_per_day() as f32
 }
 
+pub const fn per_year(rate: f32) -> f32 {
+    rate / ticks_per_year() as f32
+}
+
 #[derive(Resource, Default)]
 pub struct Tick(pub u64);
 
@@ -134,6 +138,26 @@ pub const BOILER_WOOD_COST: u32 = 24;
 pub const UPGRADE_HEAT: f32 = 18.0;
 pub const BUILDING_COUNT: usize = 3;
 pub const CARGO_COUNT: usize = 2;
+
+// Lifecycle. Nobody dies on a birthday: hardiness holds until frailty sets in,
+// then falls away towards a span of their own, and a cold night rolls against
+// whatever is left of it.
+pub const FRAILTY_ONSET: f32 = 40.0;
+pub const LIFESPAN_BASE: f32 = 55.0;
+pub const LIFESPAN_SPREAD: f32 = 0.1;
+pub const COLD_SNAP_LETHALITY: f32 = 0.02;
+pub const ADULT_AGE: f32 = 15.0;
+pub const FERTILE_UNTIL: f32 = 45.0;
+pub const MATURATION_SLOW: f32 = 0.6;
+pub const MATURATION_FAST: f32 = 1.6;
+// Chance one couple has a child over a season, before spare housing scales it.
+pub const BIRTH_SEASON_CHANCE: f32 = 0.9;
+pub const FOUNDER_AGE_MIN: f32 = 16.0;
+pub const FOUNDER_AGE_MAX: f32 = 52.0;
+// Salts keep the rolls a citizen makes for different things independent.
+pub const LIFESPAN_SALT: u64 = 0x11;
+pub const COLD_SNAP_SALT: u64 = 0x22;
+pub const BIRTH_SALT: u64 = 0x33;
 // What the colony keeps behind the fire before it will break ground on a
 // project, so building never comes straight out of the next few nights.
 pub const BUILD_RESERVE: u32 = 50;
@@ -331,6 +355,16 @@ pub struct Generator {
     pub fuel: u32,
 }
 
+/// Everything the colony's own work touches, gathered into one borrow so the
+/// systems that change it keep a readable signature.
+#[derive(SystemParam)]
+pub struct Colony<'w> {
+    pub generator: ResMut<'w, Generator>,
+    pub granary: ResMut<'w, Granary>,
+    pub patches: ResMut<'w, Patches>,
+    pub construction: ResMut<'w, Construction>,
+}
+
 /// Everything the colony has put by, gathered into one borrow so readers do not
 /// have to name each store separately.
 #[derive(SystemParam)]
@@ -416,6 +450,18 @@ impl Building {
     }
 }
 
+/// Seeds handed out to citizens in the order they are born, so no two roll the
+/// same numbers and a run replays exactly.
+#[derive(Resource, Default)]
+pub struct Lineage(pub u64);
+
+impl Lineage {
+    pub fn next(&mut self) -> u64 {
+        self.0 += 1;
+        self.0
+    }
+}
+
 /// The mayor's office: a weight per building type, added to the ballot before
 /// it is read. Deliberately inert -- this is data with no behaviour, and the
 /// place a policy layer from outside the colony reaches in. Anything that wants
@@ -449,6 +495,12 @@ impl Built {
 #[derive(Component)]
 pub struct Citizen {
     pub needs: Needs,
+    /// Years lived, on the same clock the calendar prints.
+    pub age: f32,
+    /// The span this one would reach if nothing got them first.
+    pub lifespan: f32,
+    /// Fixed per citizen, so their rolls are their own and replay the same.
+    pub seed: u64,
     pub home: IVec2,
     pub carrying: Option<Cargo>,
     /// What this trip is for, settled once per trip so nobody turns around
@@ -464,6 +516,86 @@ pub enum Duty {
     Deliver,
     Rest,
     Gather,
+}
+
+/// Deterministic noise in `[0, 1)` from a pair of integers. The simulation has
+/// no entropy source and wants none: two runs of the same build must tell the
+/// same story, or a balance log is worth nothing.
+pub fn noise(seed: u64, salt: u64) -> f32 {
+    let mut z = seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(salt.wrapping_mul(0xBF58_476D_1CE4_E5B9));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 40) as f32 / (1u64 << 24) as f32
+}
+
+/// The span a citizen would reach if nothing else got them first, scattered
+/// about the expected one so a founding party does not die together.
+pub fn lifespan_of(seed: u64) -> f32 {
+    let drift = (noise(seed, LIFESPAN_SALT) - 0.5) * 2.0 * LIFESPAN_SPREAD;
+    LIFESPAN_BASE * (1.0 + drift)
+}
+
+/// How well a citizen still shrugs off a cold night. Whole while they are
+/// young, falling away once frailty sets in, and gone by their own span. There
+/// is no age at which anyone simply dies.
+pub fn hardiness(age: f32, lifespan: f32) -> f32 {
+    if age <= FRAILTY_ONSET {
+        return 1.0;
+    }
+    let remaining = (lifespan - FRAILTY_ONSET).max(1.0);
+    (1.0 - (age - FRAILTY_ONSET) / remaining).clamp(0.0, 1.0)
+}
+
+/// Whether a cold night carries a citizen off. What hardiness they have left is
+/// what stands between them and the roll, so winter is what does the killing.
+pub fn cold_takes(hardiness: f32, roll: f32) -> bool {
+    roll < (1.0 - hardiness) * COLD_SNAP_LETHALITY
+}
+
+pub fn is_adult(age: f32) -> bool {
+    age >= ADULT_AGE
+}
+
+/// How fast children grow up. A colony with warmth and food to spare raises
+/// them faster, so the shape of its age pyramid is an output of how it is doing
+/// rather than a number anyone set.
+pub fn maturation_rate(warm_share: f32, fed_share: f32) -> f32 {
+    let comfort = ((warm_share + fed_share) / 2.0).clamp(0.0, 1.0);
+    MATURATION_SLOW + comfort * (MATURATION_FAST - MATURATION_SLOW)
+}
+
+/// Couples the colony could have, from those grown and still of an age for it.
+pub fn couples(ages: &[f32]) -> usize {
+    ages.iter()
+        .filter(|age| is_adult(**age) && **age <= FERTILE_UNTIL)
+        .count()
+        / 2
+}
+
+/// The chance one couple has a child over a season. Spare beds scale it rather
+/// than gating it: a colony with room grows, a full one tails off, and neither
+/// arrives as the step function that makes a generation land all at once.
+pub fn birth_chance_per_season(spare_beds: usize, couples: usize) -> f32 {
+    if couples == 0 {
+        return 0.0;
+    }
+    let room = (spare_beds as f32 / couples as f32).min(1.0);
+    BIRTH_SEASON_CHANCE * room
+}
+
+/// The same chance spread over the checks a season is made of.
+pub fn birth_chance_per_check(seasonal: f32) -> f32 {
+    seasonal / (ticks_per_season() / BIRTH_EVERY) as f32
+}
+
+/// The age a founder starts at, spread across the party so that frailty, and
+/// so death, does not arrive for all of them in the same winter.
+pub fn founder_age(index: usize, of: usize) -> f32 {
+    let along = index as f32 / (of.max(2) - 1) as f32;
+    FOUNDER_AGE_MIN + along.min(1.0) * (FOUNDER_AGE_MAX - FOUNDER_AGE_MIN)
 }
 
 pub fn ring_pos(radius: f32, angle: f32) -> IVec2 {
@@ -500,7 +632,7 @@ pub fn step_toward(from: IVec2, to: IVec2) -> IVec2 {
 
 /// The most urgent thing a citizen could be doing. A need that kills outranks
 /// the load on their back; tiredness does not.
-pub fn choose_duty(needs: &Needs, carrying: Option<Cargo>) -> Duty {
+pub fn choose_duty(needs: &Needs, carrying: Option<Cargo>, grown: bool) -> Duty {
     for kind in needs.pressing_by_urgency() {
         match kind {
             NeedKind::Warmth => return Duty::WarmUp,
@@ -508,6 +640,10 @@ pub fn choose_duty(needs: &Needs, carrying: Option<Cargo>) -> Duty {
             NeedKind::Rest if carrying.is_none() => return Duty::Rest,
             NeedKind::Rest => {}
         }
+    }
+    if !grown {
+        // Children are mouths, not hands: they keep to the house until grown.
+        return Duty::Rest;
     }
     if carrying.is_some() {
         Duty::Deliver
@@ -658,6 +794,11 @@ pub fn free_home(sites: &[IVec2], homes: &[IVec2]) -> Option<IVec2> {
         .iter()
         .find(|site| homes.iter().filter(|home| *home == *site).count() < HOUSE_CAPACITY)
         .copied()
+}
+
+/// Beds standing empty across every house, which is what scales the birth rate.
+pub fn spare_beds(sites: &[IVec2], homes: &[IVec2]) -> usize {
+    (sites.len() * HOUSE_CAPACITY).saturating_sub(homes.len())
 }
 
 /// Lowest plot with nothing on it. Buildings only ever go up, so this is simply
@@ -811,10 +952,14 @@ pub fn setup(mut commands: Commands) {
         };
         homes.push(home);
         let angle = i as f32 / CITIZENS as f32 * std::f32::consts::TAU;
+        let seed = i as u64 + 1;
         commands.spawn((
             Pos(ring_pos(START_RING, angle)),
             Citizen {
                 needs: Needs::founder(i, CITIZENS),
+                age: founder_age(i, CITIZENS),
+                lifespan: lifespan_of(seed),
+                seed,
                 home,
                 carrying: None,
                 hauling: Cargo::Wood,
@@ -827,6 +972,26 @@ pub fn setup(mut commands: Commands) {
 
 pub fn advance_tick(mut tick: ResMut<Tick>) {
     tick.0 += 1;
+}
+
+/// A year of life per year on the calendar, so the date on screen never
+/// contradicts anyone's age. Children run faster or slower than that with how
+/// well the colony is feeding and warming them.
+pub fn aging(mut citizens: Query<&mut Citizen>) {
+    let people: Vec<Needs> = citizens.iter().map(|citizen| citizen.needs).collect();
+    let shares = met_shares(&people);
+    let growing_up = maturation_rate(
+        shares[NeedKind::Warmth as usize],
+        shares[NeedKind::Food as usize],
+    );
+    for mut citizen in &mut citizens {
+        let rate = if is_adult(citizen.age) {
+            1.0
+        } else {
+            growing_up
+        };
+        citizen.age += per_year(rate);
+    }
 }
 
 pub fn advance_calendar(tick: Res<Tick>, mut calendar: ResMut<Calendar>) {
@@ -900,11 +1065,13 @@ pub fn construction(
     }
 }
 
-/// A colony with every need met and both stockpiles up takes in a newcomer, but
-/// only if a bed is standing empty for them.
+/// Children, one roll per couple. A colony that is warm, rested and fed with
+/// stores behind it has them; how often depends on how much room is left,
+/// which tails off instead of stopping dead the way a free-bed gate does.
 pub fn colony_growth(
     mut commands: Commands,
     tick: Res<Tick>,
+    mut lineage: ResMut<Lineage>,
     generator: Res<Generator>,
     granary: Res<Granary>,
     houses: Query<(&Pos, &Structure)>,
@@ -913,67 +1080,85 @@ pub fn colony_growth(
     if !tick.0.is_multiple_of(BIRTH_EVERY) {
         return;
     }
+    let people: Vec<Needs> = citizens.iter().map(|citizen| citizen.needs).collect();
+    if !colony_thrives(met_shares(&people), generator.fuel, granary.food) {
+        return;
+    }
     let sites: Vec<IVec2> = houses
         .iter()
         .filter(|(_, structure)| structure.0 == Building::House)
         .map(|(pos, _)| pos.0)
         .collect();
-    let homes: Vec<IVec2> = citizens.iter().map(|citizen| citizen.home).collect();
-    let Some(home) = free_home(&sites, &homes) else {
-        return;
-    };
-    let people: Vec<Needs> = citizens.iter().map(|citizen| citizen.needs).collect();
-    if !colony_thrives(met_shares(&people), generator.fuel, granary.food) {
-        return;
+    let mut homes: Vec<IVec2> = citizens.iter().map(|citizen| citizen.home).collect();
+    let ages: Vec<f32> = citizens.iter().map(|citizen| citizen.age).collect();
+    let pairs = couples(&ages);
+    let chance = birth_chance_per_check(birth_chance_per_season(spare_beds(&sites, &homes), pairs));
+
+    for pair in 0..pairs {
+        let roll = noise(
+            lineage.0.wrapping_add(pair as u64),
+            BIRTH_SALT.wrapping_add(tick.0),
+        );
+        if roll >= chance {
+            continue;
+        }
+        let Some(home) = free_home(&sites, &homes) else {
+            break;
+        };
+        homes.push(home);
+        let seed = lineage.next();
+        commands.spawn((
+            Pos(CENTER),
+            Citizen {
+                needs: Needs::newcomer(),
+                age: 0.0,
+                lifespan: lifespan_of(seed),
+                seed,
+                home,
+                carrying: None,
+                hauling: Cargo::Wood,
+            },
+        ));
     }
-    commands.spawn((
-        Pos(CENTER),
-        Citizen {
-            needs: Needs::newcomer(),
-            home,
-            carrying: None,
-            hauling: Cargo::Wood,
-        },
-    ));
 }
 
 pub fn citizen_ai(
     mut commands: Commands,
+    tick: Res<Tick>,
     built: Res<Built>,
-    mut generator: ResMut<Generator>,
-    mut granary: ResMut<Granary>,
-    mut patches: ResMut<Patches>,
-    mut construction: ResMut<Construction>,
+    mut colony: Colony,
     mut citizens: Query<(Entity, &mut Pos, &mut Citizen)>,
 ) {
     // One reading for the whole tick, so a citizen's luck does not depend on the
     // order the deliveries happen to land in.
-    let output = generator_output(generator.fuel, built.of(Building::GeneratorUpgrade));
-    let site_pos = construction.site.as_ref().map(|site| site.pos);
+    let output = generator_output(colony.generator.fuel, built.of(Building::GeneratorUpgrade));
+    let site_pos = colony.construction.site.as_ref().map(|site| site.pos);
     let population = citizens.iter().count();
     // Who is already committed to fetching what, kept up to date as citizens
     // change their minds, so each decision this tick sees the ones before it.
     let mut inbound = [0usize; CARGO_COUNT];
     for (_, _, citizen) in &citizens {
-        inbound[citizen.hauling as usize] += 1;
+        if is_adult(citizen.age) {
+            inbound[citizen.hauling as usize] += 1;
+        }
     }
+    // Once a day the cold gets its roll against whoever it has found.
+    let cold_night = tick.0.is_multiple_of(ticks_per_day());
 
     for (entity, mut pos, mut citizen) in &mut citizens {
         let at_home = pos.0 == citizen.home;
         let at_centre = (pos.0 - CENTER).abs().max_element() <= 1;
-        let duty = choose_duty(&citizen.needs, citizen.carrying);
+        let grown = is_adult(citizen.age);
+        let duty = choose_duty(&citizen.needs, citizen.carrying, grown);
 
         // Eating is what makes the food need met this tick, so it happens before
         // the needs are stepped.
-        let eating = takes_a_meal(&citizen.needs, at_centre, granary.food);
+        let eating = takes_a_meal(&citizen.needs, at_centre, colony.granary.food);
         if eating {
-            granary.food -= FOOD_PER_MEAL;
+            colony.granary.food -= FOOD_PER_MEAL;
         }
-        let met = [
-            heat_at(pos.0, output) >= 0.0,
-            duty == Duty::Rest && at_home,
-            eating,
-        ];
+        let warm = heat_at(pos.0, output) >= 0.0;
+        let met = [warm, duty == Duty::Rest && at_home, eating];
         for (index, kind) in NEEDS.into_iter().enumerate() {
             let scale = if kind == NeedKind::Warmth && at_home {
                 SHELTER_DRAIN_FACTOR
@@ -986,25 +1171,37 @@ pub fn citizen_ai(
             commands.entity(entity).despawn();
             continue;
         }
+        // The snap is the air they are standing in, not how desperate they are.
+        // Rolling only once a citizen is already freezing would mean frailty
+        // never got to decide anything.
+        if cold_night && !warm {
+            let roll = noise(citizen.seed, COLD_SNAP_SALT.wrapping_add(tick.0));
+            if cold_takes(hardiness(citizen.age, citizen.lifespan), roll) {
+                commands.entity(entity).despawn();
+                continue;
+            }
+        }
 
         if let Some(cargo) = citizen.carrying {
-            let drop_off = delivery_target(cargo, construction.diverting, site_pos);
+            let drop_off = delivery_target(cargo, colony.construction.diverting, site_pos);
             if (pos.0 - drop_off).abs().max_element() <= 1 {
-                match (cargo, construction.site.as_mut()) {
+                match (cargo, colony.construction.site.as_mut()) {
                     (Cargo::Wood, Some(site))
                         if log_goes_to_site(drop_off, site.pos, site.delivered, site.building) =>
                     {
                         site.delivered += 1;
                     }
-                    (Cargo::Wood, _) => generator.fuel += 1,
-                    (Cargo::Food, _) => granary.food += food_yield(built.of(Building::HuntersHut)),
+                    (Cargo::Wood, _) => colony.generator.fuel += 1,
+                    (Cargo::Food, _) => {
+                        colony.granary.food += food_yield(built.of(Building::HuntersHut))
+                    }
                 }
                 citizen.carrying = None;
                 let next = haul_choice(
                     citizen.hauling,
                     Supply {
-                        fuel: generator.fuel,
-                        food: granary.food,
+                        fuel: colony.generator.fuel,
+                        food: colony.granary.food,
                         inbound,
                         population,
                         huts: built.of(Building::HuntersHut),
@@ -1018,20 +1215,20 @@ pub fn citizen_ai(
             }
         }
 
-        let source = gather_source(&patches, citizen.hauling, pos.0);
+        let source = gather_source(&colony.patches, citizen.hauling, pos.0);
         if duty == Duty::Gather
             && let Some((cell, kind)) = source
             && cell == pos.0
         {
-            take_from_patch(&mut patches, cell);
+            take_from_patch(&mut colony.patches, cell);
             citizen.carrying = Some(kind);
         }
 
         // Handing a load over or picking one up flips this tick's duty; nothing
         // else about the citizen has changed since it was chosen.
-        let duty = choose_duty(&citizen.needs, citizen.carrying);
+        let duty = choose_duty(&citizen.needs, citizen.carrying, grown);
         let drop_off = citizen.carrying.map_or(CENTER, |cargo| {
-            delivery_target(cargo, construction.diverting, site_pos)
+            delivery_target(cargo, colony.construction.diverting, site_pos)
         });
         let target = duty_target(
             duty,
@@ -1342,15 +1539,15 @@ mod tests {
         let mut needs = Needs::newcomer();
         set(&mut needs, NeedKind::Rest, NeedKind::Rest.rules().low, true);
         assert_eq!(
-            choose_duty(&needs, Some(Cargo::Wood)),
+            choose_duty(&needs, Some(Cargo::Wood), true),
             Duty::Deliver,
             "wood is dropped off before bed"
         );
-        assert_eq!(choose_duty(&needs, None), Duty::Rest);
+        assert_eq!(choose_duty(&needs, None, true), Duty::Rest);
 
         set(&mut needs, NeedKind::Food, 1.0, true);
         assert_eq!(
-            choose_duty(&needs, Some(Cargo::Wood)),
+            choose_duty(&needs, Some(Cargo::Wood), true),
             Duty::Eat,
             "a starving citizen puts the load down"
         );
@@ -1359,8 +1556,8 @@ mod tests {
     #[test]
     fn a_citizen_with_nothing_pressing_goes_to_work() {
         let needs = Needs::newcomer();
-        assert_eq!(choose_duty(&needs, None), Duty::Gather);
-        assert_eq!(choose_duty(&needs, Some(Cargo::Food)), Duty::Deliver);
+        assert_eq!(choose_duty(&needs, None, true), Duty::Gather);
+        assert_eq!(choose_duty(&needs, Some(Cargo::Food), true), Duty::Deliver);
     }
 
     #[test]
@@ -1414,7 +1611,9 @@ mod tests {
     }
 
     /// Stock levels that put the two stores exactly `gap` shares apart, with
-    /// wood ahead when `gap` is positive.
+    /// wood ahead when `gap` is positive. Pin one store on its target rather
+    /// than piling it high: a store far above target swamps the band, and a
+    /// test written that way passes whatever the band does.
     fn stores_apart(population: usize, gap: f32) -> (u32, u32) {
         let fuel = population as f32 * FUEL_PER_CITIZEN;
         let food = population as f32 * FOOD_PER_CITIZEN * (1.0 - gap);
@@ -2161,7 +2360,7 @@ mod tests {
             "this citizen is worse off for cold than for hunger"
         );
         assert_eq!(
-            choose_duty(&desperate, None),
+            choose_duty(&desperate, None, true),
             Duty::WarmUp,
             "so the cold is what they walk towards"
         );
@@ -2182,5 +2381,227 @@ mod tests {
                 "a founder must not start out in the cold"
             );
         }
+    }
+
+    #[test]
+    fn noise_is_uniform_enough_to_roll_against_and_never_repeats_itself() {
+        let mut buckets = [0usize; 10];
+        for seed in 0..2000u64 {
+            let value = noise(seed, 7);
+            assert!((0.0..1.0).contains(&value), "noise left the unit interval");
+            buckets[(value * 10.0) as usize] += 1;
+        }
+        for (i, count) in buckets.iter().enumerate() {
+            assert!(*count > 100, "bucket {i} holds only {count} of 2000");
+        }
+        assert_ne!(noise(1, 1), noise(1, 2), "a different roll differs");
+        assert_ne!(noise(1, 1), noise(2, 1), "a different citizen differs");
+    }
+
+    #[test]
+    fn noise_replays_the_same_way() {
+        assert_eq!(noise(42, 3), noise(42, 3));
+    }
+
+    #[test]
+    fn a_lifespan_is_near_the_expected_one_but_never_exactly_it() {
+        let spans: Vec<f32> = (0..500u64).map(lifespan_of).collect();
+        for span in &spans {
+            let drift = (span - LIFESPAN_BASE).abs() / LIFESPAN_BASE;
+            assert!(
+                drift <= LIFESPAN_SPREAD + 1e-6,
+                "{span} is outside the spread"
+            );
+        }
+        let highest = spans.iter().copied().fold(f32::MIN, f32::max);
+        let lowest = spans.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            highest - lowest > LIFESPAN_BASE * LIFESPAN_SPREAD,
+            "lifespans must actually vary, or the deaths come in a cohort"
+        );
+    }
+
+    #[test]
+    fn hardiness_holds_until_frailty_then_falls_away() {
+        let span = LIFESPAN_BASE;
+        assert_eq!(hardiness(0.0, span), 1.0);
+        assert_eq!(
+            hardiness(FRAILTY_ONSET, span),
+            1.0,
+            "nobody frails on a birthday"
+        );
+        assert!(hardiness(FRAILTY_ONSET + 5.0, span) < 1.0);
+        assert!(hardiness(FRAILTY_ONSET + 10.0, span) < hardiness(FRAILTY_ONSET + 5.0, span));
+        assert_eq!(hardiness(span, span), 0.0);
+        assert_eq!(
+            hardiness(span * 2.0, span),
+            0.0,
+            "hardiness does not go negative"
+        );
+    }
+
+    #[test]
+    fn a_shorter_lifespan_frails_faster() {
+        let age = FRAILTY_ONSET + 5.0;
+        assert!(
+            hardiness(age, LIFESPAN_BASE * 0.9) < hardiness(age, LIFESPAN_BASE * 1.1),
+            "the same age is harder on someone with less span left"
+        );
+    }
+
+    #[test]
+    fn the_cold_spares_the_hale_and_finds_the_frail() {
+        assert!(!cold_takes(1.0, 0.0), "full hardiness shrugs off any night");
+        assert!(
+            cold_takes(0.0, 0.0),
+            "no hardiness and the worst roll is fatal"
+        );
+        let unlucky = 0.0;
+        assert!(
+            !cold_takes(0.9, COLD_SNAP_LETHALITY),
+            "a roll at the lethality bound is survived"
+        );
+        assert!(cold_takes(0.5, unlucky));
+    }
+
+    #[test]
+    fn a_cold_night_is_survivable_far_more_often_than_not() {
+        let frail = 0.5;
+        let taken = (0..1000u64)
+            .filter(|seed| cold_takes(frail, noise(*seed, 11)))
+            .count();
+        assert!(taken > 0, "a frail citizen must be at some risk");
+        assert!(
+            taken < 200,
+            "one cold night in five would be a massacre, not a winter: {taken} of 1000"
+        );
+    }
+
+    #[test]
+    fn childhood_ends_at_adulthood_and_not_before() {
+        assert!(!is_adult(0.0));
+        assert!(!is_adult(ADULT_AGE - 0.1));
+        assert!(is_adult(ADULT_AGE));
+        assert!(is_adult(LIFESPAN_BASE));
+    }
+
+    #[test]
+    fn a_colony_with_something_to_spare_raises_children_faster() {
+        assert!(maturation_rate(1.0, 1.0) > maturation_rate(0.0, 0.0));
+        assert!(
+            maturation_rate(0.0, 0.0) > 0.0,
+            "children still grow in a hard year"
+        );
+        assert!(maturation_rate(1.0, 0.0) > maturation_rate(0.0, 0.0));
+        assert!(maturation_rate(0.0, 1.0) > maturation_rate(0.0, 0.0));
+    }
+
+    #[test]
+    fn couples_are_counted_from_grown_citizens_of_an_age_for_it() {
+        let grown = [ADULT_AGE, ADULT_AGE + 1.0, ADULT_AGE + 2.0, ADULT_AGE + 3.0];
+        assert_eq!(couples(&grown), 2);
+        assert_eq!(couples(&[ADULT_AGE]), 0, "one citizen is not a couple");
+        assert_eq!(
+            couples(&[ADULT_AGE - 1.0; 8]),
+            0,
+            "children are not couples"
+        );
+        assert_eq!(couples(&[FERTILE_UNTIL + 1.0; 8]), 0, "nor are the elderly");
+    }
+
+    #[test]
+    fn spare_beds_scale_the_birth_rate_instead_of_gating_it() {
+        assert_eq!(birth_chance_per_season(0, 10), 0.0, "a full colony stops");
+        let some = birth_chance_per_season(5, 10);
+        let plenty = birth_chance_per_season(10, 10);
+        assert!(some > 0.0 && some < plenty, "room scales the rate smoothly");
+        assert_eq!(
+            birth_chance_per_season(100, 10),
+            plenty,
+            "beyond one bed a couple, more room adds nothing"
+        );
+        assert_eq!(birth_chance_per_season(10, 0), 0.0, "nobody to have them");
+    }
+
+    #[test]
+    fn a_seasonal_chance_spread_over_its_checks_keeps_its_rate() {
+        let seasonal = 0.9;
+        let per_check = birth_chance_per_check(seasonal);
+        let checks = (ticks_per_season() / BIRTH_EVERY) as f32;
+        assert!((per_check * checks - seasonal).abs() < 1e-4);
+        assert!(per_check < seasonal, "one check is not the whole season");
+    }
+
+    #[test]
+    fn founders_are_grown_and_spread_across_the_years() {
+        let ages: Vec<f32> = (0..CITIZENS).map(|i| founder_age(i, CITIZENS)).collect();
+        for age in &ages {
+            assert!(is_adult(*age), "a founding party is not made of children");
+            assert!(
+                *age < LIFESPAN_BASE,
+                "nor of people already past their span"
+            );
+        }
+        let highest = ages.iter().copied().fold(f32::MIN, f32::max);
+        let lowest = ages.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            highest > FRAILTY_ONSET,
+            "some founders must already be frail, or nobody ages inside a run"
+        );
+        assert!(
+            highest - lowest > FRAILTY_ONSET / 2.0,
+            "a founding party all of an age dies all at once"
+        );
+    }
+
+    #[test]
+    fn spare_beds_are_what_is_left_after_everyone_is_housed() {
+        let sites: Vec<IVec2> = (0..2).filter_map(plot_site).collect();
+        let beds = sites.len() * HOUSE_CAPACITY;
+        assert_eq!(spare_beds(&sites, &[]), beds);
+        let homes: Vec<IVec2> = std::iter::repeat_n(sites[0], HOUSE_CAPACITY).collect();
+        assert_eq!(spare_beds(&sites, &homes), beds - HOUSE_CAPACITY);
+        let full: Vec<IVec2> = sites
+            .iter()
+            .flat_map(|site| std::iter::repeat_n(*site, HOUSE_CAPACITY))
+            .collect();
+        assert_eq!(spare_beds(&sites, &full), 0);
+        let crowded: Vec<IVec2> = std::iter::repeat_n(sites[0], beds + 4).collect();
+        assert_eq!(
+            spare_beds(&sites, &crowded),
+            0,
+            "an overfull colony has no room"
+        );
+    }
+
+    #[test]
+    fn a_child_stays_out_of_the_way_instead_of_going_to_work() {
+        let calm = Needs::newcomer();
+        assert_eq!(choose_duty(&calm, None, true), Duty::Gather);
+        assert_eq!(
+            choose_duty(&calm, None, false),
+            Duty::Rest,
+            "children are mouths, not hands, until they are grown"
+        );
+    }
+
+    #[test]
+    fn a_child_still_answers_its_own_needs() {
+        let mut hungry = Needs::newcomer();
+        set(
+            &mut hungry,
+            NeedKind::Food,
+            NeedKind::Food.rules().low,
+            true,
+        );
+        assert_eq!(choose_duty(&hungry, None, false), Duty::Eat);
+        let mut cold = Needs::newcomer();
+        set(
+            &mut cold,
+            NeedKind::Warmth,
+            NeedKind::Warmth.rules().low,
+            true,
+        );
+        assert_eq!(choose_duty(&cold, None, false), Duty::WarmUp);
     }
 }
