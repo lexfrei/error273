@@ -3,8 +3,8 @@ use bevy::prelude::*;
 
 use crate::sim::{
     ADULT_AGE, BUILDING_COUNT, BUILDINGS, Ballot, Building, CENTER, Calendar, Cargo, Construction,
-    FRAILTY_ONSET, NEAR_GROUND, Outside, Patches, Regard, STAT_COUNT, STATS, Stores, couples,
-    is_adult,
+    FRAILTY_ONSET, Missing, NEAR_GROUND, Outside, Patches, Regard, STAT_COUNT, STATS, Stores,
+    couples, is_adult,
 };
 
 pub const STATUS_LINES: usize = 5;
@@ -18,6 +18,7 @@ pub struct Readings<'w> {
     pub patches: Res<'w, Patches>,
     pub construction: Res<'w, Construction>,
     pub ballot: Res<'w, Ballot>,
+    pub missing: Res<'w, Missing>,
 }
 
 impl Readings<'_> {
@@ -44,6 +45,9 @@ pub struct Status {
     /// Citizens working past the edge of the frame. The window cannot show them
     /// and the headless build has no frame at all, so both report the count.
     pub off_frame: usize,
+    /// Citizens who went out and did not come back. Not a death toll: the
+    /// colony does not know what happened, only that they are not here.
+    pub missing: usize,
     pub fuel: u32,
     pub food: u32,
     pub wood: u32,
@@ -113,8 +117,14 @@ pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
             status.ambient
         ),
         format!(
-            "pop {:3}  out {:2}  fuel {:4}  food {:4}  wood {:4}  game {:4}",
-            status.alive, status.off_frame, status.fuel, status.food, status.wood, status.game
+            "pop {:3}  out {:2}  missing {:2}  fuel {:4}  food {:4}  wood {:4}  game {:4}",
+            status.alive,
+            status.off_frame,
+            status.missing,
+            status.fuel,
+            status.food,
+            status.wood,
+            status.game
         ),
         format!(
             "{}  project {}  vote {}",

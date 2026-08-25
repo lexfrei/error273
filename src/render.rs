@@ -66,6 +66,7 @@ pub fn print_status(
         ambient: readings.outside.air.ambient,
         alive: ages.len(),
         off_frame: walkers.iter().filter(|pos| !on_frame(pos.0)).count(),
+        missing: readings.missing.count(),
         fuel: readings.stores.generator.fuel,
         food: readings.stores.granary.food,
         wood: readings.standing(Cargo::Wood),

@@ -81,7 +81,7 @@ That is the whole frame: forty-nine cells across, the hearth in the middle, and 
 | `z` | a citizen asleep at home |
 | `.` | open ground |
 
-Five lines sit under the map. The first is the tick counter, the date it works out to, and the air outside the fire's reach. The second is the living population, how many of them are working past the edge of the frame, and the four quantities that decide the run: fuel in the generator, food in the granary, and the wood and game still standing on the near ground -- the twenty-four cells around the hearth the colony lives off. A total over the whole world would only report how far the colony has wandered, so those two columns are the ground the colony works rather than the ground that exists. The third counts what has been built, names the project in progress with how much timber it has swallowed so far, and gives the last ballot as votes for house, hut, boiler and waystation in that order. The fourth is the age pyramid -- children, grown citizens, the frail -- how many couples the colony has, and the middle of the colony for each of the three stats. That last is an aggregate and not a reveal: what any one citizen is stays hidden.
+Five lines sit under the map. The first is the tick counter, the date it works out to, and the air outside the fire's reach. The second is the living population, how many of them are working past the edge of the frame, how many are unaccounted for, and the four quantities that decide the run: fuel in the generator, food in the granary, and the wood and game still standing on the near ground -- the twenty-four cells around the hearth the colony lives off. A total over the whole world would only report how far the colony has wandered, so those two columns are the ground the colony works rather than the ground that exists. The third counts what has been built, names the project in progress with how much timber it has swallowed so far, and gives the last ballot as votes for house, hut, boiler and waystation in that order. The fourth is the age pyramid -- children, grown citizens, the frail -- how many couples the colony has, and the middle of the colony for each of the three stats. That last is an aggregate and not a reveal: what any one citizen is stays hidden.
 
 ## Running it
 
@@ -149,6 +149,12 @@ A citizen who walks back to warmth instead of working loses hours, and the ballo
 It cannot go wherever it likes. A waystation is a brazier and a woodshed, and the shed is filled by haulers walking out to it, so a post further out than somebody can reach and come back from is a post that never burns. The site is drawn back along the line until it is one that can be fed, which means a chain of them cannot be laid in one reach: it grows a link at a time, each fire close enough to the last that the colony can supply it.
 
 Every shed short of wood claims one hauler -- the one standing nearest it -- and takes their load ahead of the hearth, out of the same surplus that pays for building and out of nothing else. One each is what makes a chain a standing tax that grows with its length rather than a levy that empties the hearth the moment a single post stands. A brazier burns its shed down on its own clock whether or not anybody is there, so keeping one lit is a cost the colony carries for as long as it wants the ground.
+
+### Not coming back
+
+A citizen who stops being alive within the ground the colony works is dead, and the colony knows it. Past that ground nobody is watching, so what the colony learns is only that somebody did not come back, and the status line counts them as missing rather than as a death.
+
+There are two ways an absence stops being one. Somebody walks to the spot and finds them, which costs the colony the same trip that lost the first citizen -- so the next scout sent out walks towards the last place anybody was seen instead of a direction drawn from the seed. Or the colony gives up: after a year it raises a slab, which costs wood it could have burned, and a colony that cannot spare the wood keeps waiting, which is the honest version of not being able to afford to grieve. The slab itself is not built anywhere yet; where a reader could go and read it is the chronicle's business, and there is no chronicle.
 
 ### Looking
 

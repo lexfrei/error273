@@ -42,6 +42,7 @@ fn main() {
         .init_resource::<Postings>()
         .insert_resource(Generator { fuel: START_FUEL })
         .insert_resource(Granary { food: START_FOOD })
+        .init_resource::<sim::Missing>()
         .add_systems(Startup, sim::setup)
         .add_systems(
             SimSchedule,
@@ -60,6 +61,7 @@ fn main() {
                 sim::citizen_ai,
                 sim::colony_growth,
                 sim::burn_caches,
+                sim::raise_memorials,
                 sim::burn_fuel,
             )
                 .chain(),

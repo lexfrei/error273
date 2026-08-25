@@ -167,6 +167,13 @@ pub const WAYSTATION_HEAT: f32 = 40.0;
 /// is meant to be a standing tax on the workforce, not a thing filled once.
 pub const WAYSTATION_CACHE: u32 = 12;
 pub const WAYSTATION_BURN_EVERY: u64 = 6 * TICKS_PER_HOUR;
+/// What a slab costs to raise, and how long the colony waits before it gives
+/// up on somebody. A year is the wait: long enough that a scout still out is
+/// not written off, short enough that the colony is not counting the same
+/// absence a decade later.
+pub const MEMORIAL_WOOD_COST: u32 = 8;
+pub const MEMORIAL_AFTER: u64 = TICKS_PER_HOUR * HOURS_PER_DAY * DAYS_PER_SEASON * SEASONS_PER_YEAR;
+
 /// How far past the warmth it already has the colony may put a new fire.
 ///
 /// A post is stocked by haulers walking out to it, and a hauler can only go as
@@ -1133,6 +1140,8 @@ pub struct Colony<'w, 's> {
     /// The sheds at the waystations, which are a store like any other and are
     /// filled by the same haulers.
     pub posts: Sheds<'w, 's>,
+    /// Who has not come back.
+    pub missing: ResMut<'w, Missing>,
 }
 
 /// Everything the colony has put by, gathered into one borrow so readers do not
@@ -1412,6 +1421,75 @@ impl Patches {
             })
         });
     }
+}
+
+/// Somebody who went out and did not come back.
+///
+/// The colony does not learn that a citizen died. It learns that they are not
+/// here, and where they were last making for; what closes the event is either a
+/// body found or a slab raised without one, and the second costs build capacity
+/// where the first costs somebody the same walk.
+#[derive(Debug, Clone, Copy)]
+pub struct Lost {
+    pub at: IVec2,
+    pub since: u64,
+}
+
+#[derive(Resource, Default)]
+pub struct Missing(Vec<Lost>);
+
+impl Missing {
+    pub fn count(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Somebody has stopped being here. Whether that is a death or an absence
+    /// depends only on whether the colony was in a position to see it.
+    pub fn take_note(&mut self, at: IVec2, now: u64) {
+        if goes_missing(at) {
+            self.lost(at, now);
+        }
+    }
+
+    pub fn lost(&mut self, at: IVec2, now: u64) {
+        self.0.push(Lost { at, since: now });
+    }
+
+    /// The spot nearest to somebody setting out, if anybody is unaccounted for.
+    pub fn nearest_to(&self, from: IVec2) -> Option<IVec2> {
+        self.0
+            .iter()
+            .min_by_key(|lost| ((lost.at - from).abs().max_element(), lost.at.x, lost.at.y))
+            .map(|lost| lost.at)
+    }
+
+    /// Anybody standing where somebody was lost has found them.
+    pub fn recover(&mut self, standing: &[IVec2]) {
+        self.0.retain(|lost| {
+            !standing
+                .iter()
+                .any(|at| (*at - lost.at).abs().max_element() <= 1)
+        });
+    }
+
+    /// What the colony gives up on, and pays to give up on. A slab closes the
+    /// event without a body; a colony that cannot spare the wood keeps waiting,
+    /// which is the honest version of not being able to afford to grieve.
+    pub fn raise_memorials(&mut self, now: u64, wood: &mut u32) {
+        self.0.retain(|lost| {
+            if now.saturating_sub(lost.since) < MEMORIAL_AFTER || *wood < MEMORIAL_WOOD_COST {
+                return true;
+            }
+            *wood -= MEMORIAL_WOOD_COST;
+            false
+        });
+    }
+}
+
+/// Whether somebody dying here is a death the colony sees or an absence it is
+/// left to work out. Past the ground it works, nobody is watching.
+pub fn goes_missing(at: IVec2) -> bool {
+    (at - CENTER).abs().max_element() > NEAR_GROUND
 }
 
 /// The colony runs one project at a time; wood carried there is wood not burned.
@@ -2621,6 +2699,19 @@ pub fn advance_calendar(tick: Res<Tick>, mut calendar: ResMut<Calendar>) {
     *calendar = calendar_at(tick.0);
 }
 
+/// What the colony gives up on. Once a year it looks at whoever has been gone
+/// long enough and raises a slab for them, if it can spare the wood.
+pub fn raise_memorials(
+    tick: Res<Tick>,
+    mut missing: ResMut<Missing>,
+    mut generator: ResMut<Generator>,
+) {
+    if !tick.0.is_multiple_of(ticks_per_season()) {
+        return;
+    }
+    missing.raise_memorials(tick.0, &mut generator.fuel);
+}
+
 /// Every waystation burns its own shed down on its own clock, whether or not
 /// anybody is standing at it. Keeping one lit is a standing cost.
 pub fn burn_caches(tick: Res<Tick>, mut posts: Query<&mut Cache>) {
@@ -2691,7 +2782,12 @@ pub fn regrow_patches(tick: Res<Tick>, calendar: Res<Calendar>, mut patches: Res
 /// exactly the citizen whose day the colony is not already spending. A tour
 /// lasts a season, because the question of who can be spared is worth asking
 /// again by then.
-pub fn send_scouts(tick: Res<Tick>, air: Res<Air>, mut citizens: Query<(&Pos, &mut Citizen)>) {
+pub fn send_scouts(
+    tick: Res<Tick>,
+    air: Res<Air>,
+    missing: Res<Missing>,
+    mut citizens: Query<(&Pos, &mut Citizen)>,
+) {
     if !tick.0.is_multiple_of(ticks_per_season()) {
         return;
     }
@@ -2725,11 +2821,17 @@ pub fn send_scouts(tick: Res<Tick>, air: Res<Air>, mut citizens: Query<(&Pos, &m
         .filter(|fire| fire.heat_at(fire.at, air.ambient) > 0.0)
         .max_by_key(|fire| (fire.at - CENTER).abs().max_element())
         .map_or(CENTER, |fire| fire.at);
+    // A walk with somebody at the end of it beats a walk drawn from a hat. The
+    // colony spends the same scouting season either way, which is what §14 means
+    // by a recovery costing a second citizen the same trip.
+    let looking_for = missing.nearest_to(setting_out);
     for (_, mut citizen) in &mut citizens {
         citizen.scouting = spare
             .iter()
             .any(|(_, seed)| *seed == citizen.seed)
-            .then(|| scout_target(setting_out, citizen.seed, tick.0));
+            .then(|| {
+                looking_for.unwrap_or_else(|| scout_target(setting_out, citizen.seed, tick.0))
+            });
     }
 }
 
@@ -3107,6 +3209,7 @@ pub fn citizen_ai(
                 .step(kind, met[index], scale, marks[kind as usize]);
         }
         if citizen.needs.spent() {
+            colony.missing.take_note(pos.0, tick.0);
             commands.entity(entity).despawn();
             continue;
         }
@@ -3123,6 +3226,7 @@ pub fn citizen_ai(
                 citizen.acclimated,
             );
             if cold_takes(resistance, roll) {
+                colony.missing.take_note(pos.0, tick.0);
                 commands.entity(entity).despawn();
                 continue;
             }
@@ -3265,9 +3369,12 @@ pub fn citizen_ai(
         if pos.0 != target {
             pos.0 = step_toward(pos.0, target);
         }
-        // Standing somewhere is how the colony comes to know it. Haulers only
-        // ever stand on ground it already knows, so in practice this is the
-        // scout's whole yield.
+        // Standing somewhere is how the colony comes to know it, and how it
+        // finds anybody it lost there. Haulers only ever stand on ground it
+        // already knows, so in practice both are the scout's yield.
+        if colony.missing.count() > 0 {
+            colony.missing.recover(&[pos.0]);
+        }
         colony.patches.discover(pos.0);
         if citizen.scouting == Some(pos.0) {
             citizen.scouting = Some(scout_target(pos.0, citizen.seed, tick.0));
@@ -7020,5 +7127,70 @@ mod tests {
             None,
             "nobody asking means nowhere to put one"
         );
+    }
+
+    #[test]
+    fn dying_where_the_colony_can_see_is_not_the_same_as_not_coming_back() {
+        assert!(!goes_missing(CENTER), "nobody vanishes at the hearth");
+        assert!(!goes_missing(CENTER + IVec2::splat(NEAR_GROUND)));
+        assert!(
+            goes_missing(CENTER + IVec2::new(NEAR_GROUND + 1, 0)),
+            "past the ground the colony works, it only knows they did not come back"
+        );
+    }
+
+    #[test]
+    fn a_body_found_closes_the_event_and_nothing_else_does() {
+        let out = CENTER + IVec2::new(NEAR_GROUND + 30, 0);
+        let mut missing = Missing::default();
+        missing.lost(out, 100);
+        assert_eq!(missing.count(), 1);
+        missing.recover(&[CENTER]);
+        assert_eq!(missing.count(), 1, "nobody has been out there");
+        missing.recover(&[out + IVec2::new(1, 0)]);
+        assert_eq!(missing.count(), 0, "somebody walked to the spot");
+    }
+
+    #[test]
+    fn a_slab_closes_what_no_walk_did_and_costs_the_colony_to_raise() {
+        let out = CENTER + IVec2::new(NEAR_GROUND + 30, 0);
+        let mut missing = Missing::default();
+        missing.lost(out, 100);
+        let mut wood = MEMORIAL_WOOD_COST * 2;
+        missing.raise_memorials(100 + MEMORIAL_AFTER - 1, &mut wood);
+        assert_eq!(missing.count(), 1, "the colony waits before it gives up");
+        assert_eq!(
+            wood,
+            MEMORIAL_WOOD_COST * 2,
+            "and spends nothing while it waits"
+        );
+
+        missing.raise_memorials(100 + MEMORIAL_AFTER, &mut wood);
+        assert_eq!(missing.count(), 0, "then it raises a slab");
+        assert_eq!(wood, MEMORIAL_WOOD_COST, "which costs what a slab costs");
+    }
+
+    #[test]
+    fn a_colony_that_cannot_afford_a_slab_keeps_waiting() {
+        let out = CENTER + IVec2::new(NEAR_GROUND + 30, 0);
+        let mut missing = Missing::default();
+        missing.lost(out, 0);
+        let mut wood = MEMORIAL_WOOD_COST - 1;
+        missing.raise_memorials(MEMORIAL_AFTER * 4, &mut wood);
+        assert_eq!(missing.count(), 1, "a slab it cannot pay for is not raised");
+        assert_eq!(wood, MEMORIAL_WOOD_COST - 1);
+    }
+
+    #[test]
+    fn somebody_looking_goes_to_the_last_place_anybody_was_seen() {
+        let out = CENTER + IVec2::new(80, 0);
+        let mut missing = Missing::default();
+        missing.lost(out, 0);
+        assert_eq!(
+            missing.nearest_to(CENTER),
+            Some(out),
+            "a walk with a body at the end of it beats a walk drawn from a hat"
+        );
+        assert_eq!(Missing::default().nearest_to(CENTER), None);
     }
 }
