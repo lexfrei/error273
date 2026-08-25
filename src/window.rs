@@ -15,9 +15,9 @@ use bevy::window::WindowResolution;
 
 use crate::sim::{
     Air, BUILDINGS, Building, CENTER, Cargo, Citizen, Construction, FORMATION_NEUTRAL,
-    GENERATOR_HEAT, MOOD_BASE, NeedKind, Patches, Pos, Regard, STAT_COUNT, STATS, Structure,
-    VIEW_RADIUS, estimate, focus_band, focus_of, hardship_status, is_known, median, on_frame,
-    regard_of,
+    GENERATOR_HEAT, MOOD_BASE, NeedKind, Patches, Pos, Regard, Revels, STAT_COUNT, STATS,
+    Structure, VIEW_RADIUS, estimate, focus_band, focus_of, hardship_status, is_known, median,
+    on_frame, regard_of,
 };
 use crate::status::{CitizenCard, Readings, STATUS_LINES, Status, status_lines};
 use crate::tempo::{TICK_MS_DEFAULT, ladder_step};
@@ -286,6 +286,7 @@ fn paint_map(
 
 fn paint_status(
     readings: Readings,
+    revels: Res<Revels>,
     structures: Query<&Structure>,
     citizens: Query<&Citizen>,
     walkers: Query<&Pos, With<Citizen>>,
@@ -353,6 +354,7 @@ fn paint_status(
         ages,
         stats,
         mood,
+        revel: revels.0.name(),
         card,
     };
     let painted = status_lines(&status);

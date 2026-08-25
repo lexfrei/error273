@@ -46,6 +46,7 @@ fn main() {
         .init_resource::<sim::Weather>()
         .init_resource::<sim::Toll>()
         .init_resource::<sim::Reckoning>()
+        .init_resource::<sim::Revels>()
         .add_systems(Startup, sim::setup)
         .add_systems(
             SimSchedule,
@@ -61,6 +62,7 @@ fn main() {
                 sim::assign_trades,
                 sim::send_scouts,
                 sim::weigh_the_season,
+                sim::perform,
                 sim::construction,
                 sim::citizen_ai,
                 sim::colony_growth,

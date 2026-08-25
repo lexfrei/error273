@@ -217,7 +217,7 @@ pub const START_FOOD: u32 = 60;
 pub const START_RING: f32 = 2.0;
 
 pub const NEED_MAX: f32 = 100.0;
-pub const NEED_COUNT: usize = 3;
+pub const NEED_COUNT: usize = 4;
 /// The warmth a citizen keeps in hand on top of the walk home. It is set to the
 /// mark warmth used to act on, so a citizen standing at the fire behaves exactly
 /// as they always did and only distance changes anything.
@@ -402,7 +402,33 @@ pub const LIFESPAN_RAISED_SWING: f32 = 0.2;
 // Trades. What a citizen is worth at work is what the colony raised in them,
 // what they have practised, and -- once the mood layer exists -- how well they
 // are holding up.
-pub const TRADE_COUNT: usize = 3;
+pub const TRADE_COUNT: usize = 4;
+/// What a performance is made of. The terms are named because the whole point
+/// of this layer is that a role changes an outcome and can be shown to: a
+/// watcher should be able to read why a night went the way it did.
+///
+/// The tradition term is a seam and is always nothing today. When a colony has
+/// traditions, a performance that matches one is worth more than one that does
+/// not, and this is where that arrives.
+pub const QUALITY_AUDIENCE: f32 = 0.3;
+pub const QUALITY_WARMTH: f32 = 0.2;
+pub const QUALITY_PERFORMER: f32 = 0.4;
+pub const QUALITY_TRADITION: f32 = 0.1;
+/// The audience past which another body adds nothing, and the warmth at which
+/// a place is as good a stage as it is going to be.
+pub const AUDIENCE_FULL: f32 = 8.0;
+pub const QUALITY_WARM_ENOUGH: f32 = 10.0;
+/// How long a night that went well is still worth something. A night that did
+/// not is worth nothing rather than worth something bad: the boredom it failed
+/// to lift is already the penalty.
+pub const CHEER_DAYS_FUN: u64 = 3;
+pub const CHEER_DAYS_UNFORGETTABLE: u64 = 6;
+pub const PERFORMANCE_SALT: u64 = 0x81;
+/// How far a performance carries, and the hour of the evening it happens at.
+/// Once a day, because a performance is an event a watcher can point at rather
+/// than a hum in the background.
+pub const PERFORMANCE_REACH: i32 = 4;
+pub const PERFORMANCE_HOUR: u64 = 19;
 pub const FIT_FLOOR: f32 = 0.5;
 pub const FIT_STAT: f32 = 0.6;
 pub const FIT_PRACTICE: f32 = 0.5;
@@ -412,6 +438,10 @@ pub const FIT_CEILING: f32 = 1.8;
 /// enter below it, which is what keeps them from competing with survival in a
 /// crisis rather than needing a rule that says they must not.
 pub const NEED_WEIGHT_SURVIVAL: f32 = 10.0;
+/// What a need weighs that nobody dies of. Low enough that it can never take a
+/// citizen away from a survival need however far it has fallen, which the
+/// ordering reads off this number rather than off a rule about recreation.
+pub const NEED_WEIGHT_COMFORT: f32 = 2.0;
 /// The worst focus a citizen can be reduced to, and where the amplified part of
 /// the cost starts biting. Half is the floor because that is the penalty the
 /// shape this is taken from tops out at; the knee is near the bottom because a
@@ -487,6 +517,7 @@ pub const EXPERIENCE_RUST: f32 = per_season(0.2);
 // skipped.
 const _: () = assert!(EXPERIENCE_GAIN > EXPERIENCE_RUST);
 /// A fifth to a quarter of the workforce held back for work no trade covers.
+pub const ENTERTAINER_SHARE: f32 = 0.04;
 pub const LABORER_SHARE: f32 = 0.22;
 /// What a child of the house starts with of the head's practice in it.
 pub const INHERITED_SHARE: f32 = 0.4;
@@ -666,16 +697,22 @@ pub enum Trade {
     Woodcutter,
     Hunter,
     Laborer,
+    Entertainer,
 }
 
-pub const TRADES: [Trade; TRADE_COUNT] = [Trade::Woodcutter, Trade::Hunter, Trade::Laborer];
+pub const TRADES: [Trade; TRADE_COUNT] = [
+    Trade::Woodcutter,
+    Trade::Hunter,
+    Trade::Laborer,
+    Trade::Entertainer,
+];
 
 /// The stat a trade leans on. A labourer is judged on the same thing a
 /// woodcutter is, because that is most of what the colony asks of them.
 pub fn trade_stat(trade: Trade) -> Stat {
     match trade {
         Trade::Woodcutter | Trade::Laborer => Stat::Strength,
-        Trade::Hunter => Stat::Wits,
+        Trade::Hunter | Trade::Entertainer => Stat::Wits,
     }
 }
 
@@ -685,7 +722,7 @@ pub fn trade_cargo(trade: Trade) -> Option<Cargo> {
     match trade {
         Trade::Woodcutter => Some(Cargo::Wood),
         Trade::Hunter => Some(Cargo::Food),
-        Trade::Laborer => None,
+        Trade::Laborer | Trade::Entertainer => None,
     }
 }
 
@@ -714,6 +751,22 @@ pub fn trade_fit(stat: f32, experience: f32) -> f32 {
 /// cycle of being warm, getting cold and going back to the fire is charging
 /// them for doing their job. Measured from met, the colony died on every world
 /// tried, in its seventies at best and its fourth year at worst.
+impl NeedKind {
+    /// Whether this is one of the needs the colony runs on, as opposed to one
+    /// it is merely nicer for having met. Read off the weight rather than a
+    /// list, so the two classes cannot disagree about which need is which.
+    ///
+    /// Everything structural asks this before it counts a need: what a citizen
+    /// is worth at the work, and whether the colony is in any shape to grow.
+    /// A comfort need is paid in mood and nowhere else. Letting one into those
+    /// two would be a tax every colonist pays forever -- nothing a citizen does
+    /// alone raises it -- levied hardest on the colony too poor to spare
+    /// anybody to the evening, which is the shape this layer exists not to be.
+    pub fn is_survival(self) -> bool {
+        self.rules().weight >= NEED_WEIGHT_SURVIVAL
+    }
+}
+
 fn focus_cost(kind: NeedKind, level: f32) -> f32 {
     let rules = kind.rules();
     let short = ((rules.low - level) / rules.low).clamp(0.0, 1.0);
@@ -732,19 +785,23 @@ pub enum Thought {
     Cold,
     Hungry,
     Worn,
+    Bored,
     WrongWork,
     Missing,
     Plenty,
+    Cheered,
 }
 
-pub const THOUGHT_COUNT: usize = 6;
+pub const THOUGHT_COUNT: usize = 8;
 pub const THOUGHTS: [Thought; THOUGHT_COUNT] = [
     Thought::Cold,
     Thought::Hungry,
     Thought::Worn,
+    Thought::Bored,
     Thought::WrongWork,
     Thought::Missing,
     Thought::Plenty,
+    Thought::Cheered,
 ];
 
 impl Thought {
@@ -753,9 +810,11 @@ impl Thought {
             Thought::Cold => "cold",
             Thought::Hungry => "hungry",
             Thought::Worn => "worn out",
+            Thought::Bored => "bored",
             Thought::WrongWork => "wrong work",
             Thought::Missing => "somebody gone",
             Thought::Plenty => "plenty",
+            Thought::Cheered => "a good night",
         }
     }
 
@@ -768,9 +827,11 @@ impl Thought {
             Thought::Cold => -18.0,
             Thought::Hungry => -20.0,
             Thought::Worn => -8.0,
+            Thought::Bored => -7.0,
             Thought::WrongWork => -6.0,
             Thought::Missing => -10.0,
             Thought::Plenty => 6.0,
+            Thought::Cheered => 7.0,
         }
     }
 }
@@ -784,15 +845,18 @@ pub fn thoughts_of(
     wrong_work: bool,
     somebody_missing: bool,
     plenty: bool,
+    cheered: bool,
 ) -> [bool; THOUGHT_COUNT] {
     let past = |kind: NeedKind| needs.level(kind) < marks[kind as usize].low;
     let mut held = [false; THOUGHT_COUNT];
     held[Thought::Cold as usize] = past(NeedKind::Warmth);
     held[Thought::Hungry as usize] = past(NeedKind::Food);
     held[Thought::Worn as usize] = past(NeedKind::Rest);
+    held[Thought::Bored as usize] = past(NeedKind::Recreation);
     held[Thought::WrongWork as usize] = wrong_work;
     held[Thought::Missing as usize] = somebody_missing;
     held[Thought::Plenty as usize] = plenty;
+    held[Thought::Cheered as usize] = cheered;
     held
 }
 
@@ -902,6 +966,87 @@ pub fn hardship_status(hardship: f32) -> Hardship {
     }
 }
 
+/// What a performance is worth, from the things that made it.
+///
+/// A sum of named contributions rather than a single figure, because the layer
+/// this belongs to fails exactly when a role carries content instead of
+/// consequence: a watcher has to be able to say why a night went well.
+pub fn performance_quality(audience: usize, warmth: f32, performer: f32, tradition: f32) -> f32 {
+    let heard = (audience as f32 / AUDIENCE_FULL).clamp(0.0, 1.0);
+    let warm = (warmth / QUALITY_WARM_ENOUGH).clamp(0.0, 1.0);
+    (heard * QUALITY_AUDIENCE
+        + warm * QUALITY_WARMTH
+        + performer.clamp(0.0, 1.0) * QUALITY_PERFORMER
+        + tradition.clamp(0.0, 1.0) * QUALITY_TRADITION)
+        .clamp(0.0, 1.0)
+}
+
+/// How a night went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Terrible,
+    Boring,
+    Fun,
+    Unforgettable,
+}
+
+impl Outcome {
+    pub fn name(self) -> &'static str {
+        match self {
+            Outcome::Terrible => "terrible",
+            Outcome::Boring => "boring",
+            Outcome::Fun => "fun",
+            Outcome::Unforgettable => "unforgettable",
+        }
+    }
+
+    /// How much of somebody's boredom a night like this lifts.
+    pub fn worth(self) -> f32 {
+        match self {
+            Outcome::Terrible => 0.0,
+            Outcome::Boring => 8.0,
+            Outcome::Fun => 25.0,
+            Outcome::Unforgettable => 40.0,
+        }
+    }
+
+    /// How many days a night like this is still worth something for.
+    pub fn mood_days(self) -> u64 {
+        match self {
+            Outcome::Fun => CHEER_DAYS_FUN,
+            Outcome::Unforgettable => CHEER_DAYS_UNFORGETTABLE,
+            _ => 0,
+        }
+    }
+
+    pub fn went_well(self) -> bool {
+        matches!(self, Outcome::Fun | Outcome::Unforgettable)
+    }
+}
+
+/// Which of the four a performance of this quality turns out to be.
+///
+/// The shape is the ritual-outcome distribution this is taken from, kept as its
+/// own arithmetic rather than approximated: a poor night can still go well and
+/// a good one can still fall flat, which is what stops a colony treating an
+/// entertainer as a switch.
+pub fn performance_outcome(quality: f32, world: u64, salt: u64) -> Outcome {
+    let quality = quality.clamp(0.0, 1.0);
+    let roll = noise(world, PERFORMANCE_SALT.wrapping_add(salt));
+    let terrible = 1.0 / (4.0 + 16.0 * quality);
+    let boring = 3.0 / (4.0 + 16.0 * quality);
+    let fun = 3.0 * quality / (1.0 + 4.0 * quality);
+    if roll < terrible {
+        Outcome::Terrible
+    } else if roll < terrible + boring {
+        Outcome::Boring
+    } else if roll < terrible + boring + fun {
+        Outcome::Fun
+    } else {
+        Outcome::Unforgettable
+    }
+}
+
 /// The one multiplier every mismatch resolves into.
 ///
 /// It is a ceiling of one that falls, and never a band that rises. Focus answers
@@ -913,10 +1058,12 @@ pub fn hardship_status(hardship: f32) -> Hardship {
 pub fn focus_of(needs: &Needs) -> f32 {
     let cost: f32 = NEEDS
         .into_iter()
+        .filter(|kind| kind.is_survival())
         .map(|kind| focus_cost(kind, needs.level(kind)))
         .sum();
     let worst: f32 = NEEDS
         .into_iter()
+        .filter(|kind| kind.is_survival())
         .map(|kind| kind.rules().weight * (1.0 + FOCUS_KNEE_BITE))
         .sum();
     1.0 - (1.0 - FOCUS_FLOOR) * (cost / worst)
@@ -1003,6 +1150,13 @@ pub fn experience_step(experience: f32, working: bool) -> f32 {
 
 /// How many hands the colony keeps out of the trades so somebody can always
 /// take work no trade covers.
+/// How many of the colony's hands it spares for amusing the rest. One in a
+/// founding party, and a share after that -- an hour spent entertaining is an
+/// hour not spent on wood, so this is deliberately the smallest trade.
+pub fn entertainers_wanted(hands: usize) -> usize {
+    ((hands as f32 * ENTERTAINER_SHARE).round() as usize).max(1)
+}
+
 pub fn laborers_wanted(hands: usize) -> usize {
     (hands as f32 * LABORER_SHARE).round() as usize
 }
@@ -1203,9 +1357,15 @@ pub enum NeedKind {
     Warmth,
     Rest,
     Food,
+    Recreation,
 }
 
-pub const NEEDS: [NeedKind; NEED_COUNT] = [NeedKind::Warmth, NeedKind::Rest, NeedKind::Food];
+pub const NEEDS: [NeedKind; NEED_COUNT] = [
+    NeedKind::Warmth,
+    NeedKind::Rest,
+    NeedKind::Food,
+    NeedKind::Recreation,
+];
 
 /// How one need behaves. `low`/`high` are the hysteresis band: a citizen starts
 /// acting on the need at `low` and stops at `high`.
@@ -1243,6 +1403,23 @@ impl NeedKind {
                 // working through the band is the normal state, not a shortage.
                 comfort: 41.0,
                 weight: NEED_WEIGHT_SURVIVAL,
+                fatal: false,
+            },
+            // Slow, survivable, and answered by somebody's time rather than by
+            // anything the colony can build. It falls over weeks and fills in an
+            // evening, which is what makes an entertainer's hour worth spending
+            // and a missed one worth nothing much.
+            NeedKind::Recreation => NeedRules {
+                decay: per_day(4.0),
+                // Nothing about standing anywhere fills this one: it is filled
+                // by attending a performance, which is an event and not a
+                // state, so the ordinary recovery term is nought and `amuse`
+                // does the work.
+                recovery: 0.0,
+                low: 35.0,
+                high: 85.0,
+                comfort: 50.0,
+                weight: NEED_WEIGHT_COMFORT,
                 fatal: false,
             },
             NeedKind::Food => NeedRules {
@@ -1452,11 +1629,28 @@ impl Needs {
         self.detour as f32
     }
 
-    /// Whether nothing has gone unanswered since the last ballot. It is the
-    /// test the survival tier of the vote applies, asked directly: a citizen it
-    /// has nothing to say about is one the colony can spare for looking.
+    /// What a performance lifts. Recreation is the one need filled by something
+    /// happening rather than by somebody standing somewhere, so it is raised
+    /// here rather than through the ordinary recovery term.
+    pub fn amuse(&mut self, worth: f32) {
+        let need = &mut self.needs[NeedKind::Recreation as usize];
+        need.level = (need.level + worth).min(NEED_MAX);
+    }
+
+    /// Whether nothing the colony runs on has gone unanswered since the last
+    /// ballot. It is the test the survival tier of the vote applies, asked
+    /// directly: a citizen it has nothing to say about is one the colony can
+    /// spare for looking.
+    ///
+    /// A comfort need is not on this list. One that nothing a citizen does
+    /// alone can raise would never clear, and the colony would quietly stop
+    /// sending anybody out to look -- which is a whole layer switched off by a
+    /// need that was meant to cost a mood.
     pub fn nothing_failed(&self) -> bool {
-        NEEDS.into_iter().all(|kind| self.get(kind).burden == 0.0)
+        NEEDS
+            .into_iter()
+            .filter(|kind| kind.is_survival())
+            .all(|kind| self.get(kind).burden == 0.0)
     }
 
     pub fn comfortable(&self, kind: NeedKind) -> bool {
@@ -1470,9 +1664,15 @@ impl Needs {
             .into_iter()
             .filter(|kind| self.get(*kind).pressing)
             .collect();
+        // Weight first and shortfall second, so a need nobody dies of can never
+        // take a citizen away from one that kills however far it has fallen.
+        // The ordering reads that off the weight rather than off a rule naming
+        // which needs are which.
         pressing.sort_by(|a, b| {
-            self.shortfall(*b, marks[*b as usize])
-                .total_cmp(&self.shortfall(*a, marks[*a as usize]))
+            b.rules().weight.total_cmp(&a.rules().weight).then(
+                self.shortfall(*b, marks[*b as usize])
+                    .total_cmp(&self.shortfall(*a, marks[*a as usize])),
+            )
         });
         pressing
     }
@@ -2051,6 +2251,8 @@ pub struct Citizen {
     /// What the years have done to them, under the mood and far slower. The
     /// culture layer will read this; nothing does yet.
     pub hardship: f32,
+    /// Until when the last good night is still worth something to them.
+    pub cheered_until: u64,
     /// Until when this one is measuring against a worse year than the colony
     /// used to have. Set by a winter that took a share of the colony, and it
     /// runs out.
@@ -2560,6 +2762,10 @@ pub fn choose_duty(
             NeedKind::Food => return Duty::Eat,
             NeedKind::Rest if carrying.is_none() => return Duty::Rest,
             NeedKind::Rest => {}
+            // Nothing to walk to on your own account: being amused takes
+            // somebody else's hour, so a bored citizen keeps working and is
+            // amused if a performance happens where they are.
+            NeedKind::Recreation => {}
         }
     }
     if !grown {
@@ -2577,6 +2783,7 @@ pub fn choose_duty(
 /// any is left, and `drop_off` is wherever their load is wanted.
 pub fn duty_target(
     duty: Duty,
+    trade: Trade,
     air: &Air,
     at: IVec2,
     home: IVec2,
@@ -2588,6 +2795,12 @@ pub fn duty_target(
         Duty::Eat => CENTER,
         Duty::Deliver => drop_off,
         Duty::Rest => home,
+        // An entertainer's work is the evening, so their day is spent standing
+        // where it will happen. The warmest cell is the stage because a cold
+        // audience does not gather and a cold performance does not land, and
+        // the cost of the trade is exactly this: a pair of hands that fetches
+        // nothing.
+        Duty::Gather if trade == Trade::Entertainer => air.warmth_target(home, at),
         // With the patches stripped there is no work left, only warmth to find.
         Duty::Gather => source.unwrap_or_else(|| air.warmth_target(home, at)),
     }
@@ -2897,13 +3110,18 @@ pub fn delivery_target(
     CENTER
 }
 
-/// The building that answers a given need, and the whole of the mapping: every
-/// need has exactly one remedy and every building is somebody's.
-pub fn building_for(kind: NeedKind) -> Building {
+/// The building that answers a given need, where one does.
+///
+/// Three of the four have a remedy the colony can put up. The fourth is
+/// answered by somebody's time instead, so there is nothing for a bored citizen
+/// to ask the ballot for -- which is why this hands back nothing rather than
+/// picking a building that would not help.
+pub fn building_for(kind: NeedKind) -> Option<Building> {
     match kind {
-        NeedKind::Warmth => Building::GeneratorUpgrade,
-        NeedKind::Rest => Building::House,
-        NeedKind::Food => Building::HuntersHut,
+        NeedKind::Warmth => Some(Building::GeneratorUpgrade),
+        NeedKind::Rest => Some(Building::House),
+        NeedKind::Food => Some(Building::HuntersHut),
+        NeedKind::Recreation => None,
     }
 }
 
@@ -2915,14 +3133,22 @@ pub fn building_for(kind: NeedKind) -> Building {
 /// which is a legal thing for a contented citizen to do. The strict comparison
 /// keeps the first of any equals, so ties resolve in table order.
 pub fn vote_of(needs: &Needs) -> Option<Building> {
-    let mut choice = NEEDS[0];
+    // Only needs with a remedy are on this tier at all: a citizen suffering
+    // something the colony cannot build its way out of has nothing to ask it
+    // for, and asking for the next-best thing would be a vote nobody cast.
+    let mut choice = None;
     for kind in NEEDS {
-        if needs.get(kind).burden > needs.get(choice).burden {
-            choice = kind;
+        if building_for(kind).is_none() {
+            continue;
+        }
+        if choice.is_none_or(|best| needs.get(kind).burden > needs.get(best).burden) {
+            choice = Some(kind);
         }
     }
-    if needs.get(choice).burden > 0.0 {
-        return Some(building_for(choice));
+    if let Some(choice) = choice
+        && needs.get(choice).burden > 0.0
+    {
+        return building_for(choice);
     }
     // Nothing went unanswered, so the colony is holding for this citizen and
     // the question is no longer survival but waste. The two are never compared:
@@ -3051,7 +3277,10 @@ pub fn met_shares(people: &[Needs]) -> [f32; NEED_COUNT] {
 /// per head. Judging the stores per head rather than against a flat number is
 /// what stops a colony growing straight through its own supply.
 pub fn colony_thrives(shares: [f32; NEED_COUNT], fuel: u32, food: u32, population: usize) -> bool {
-    shares.iter().all(|share| *share >= GROWTH_SHARE)
+    NEEDS
+        .into_iter()
+        .filter(|kind| kind.is_survival())
+        .all(|kind| shares[kind as usize] >= GROWTH_SHARE)
         && stock_share(fuel, FUEL_PER_CITIZEN, population) >= 1.0
         && stock_share(food, FOOD_PER_CITIZEN, population) >= 1.0
 }
@@ -3179,6 +3408,12 @@ pub fn has_hands_to_spare(children: usize, population: usize) -> bool {
 /// first, because a colony with nobody spare has no way to fill a vacancy; the
 /// rest go mostly to the treelines, because the fire is most of what a colony
 /// spends and nobody quits a trade once they have it.
+///
+/// Nobody is founded to the evening. The rule the trade lives under is that an
+/// hour spent amusing is spent on a plateau and never in a winter, and the
+/// founding party is the leanest the colony will ever be: it has stores for a
+/// season, no houses beyond its own, and no idea yet where the wood is. The
+/// first entertainer is appointed once the colony has earned one.
 pub fn founding_trade(index: usize) -> Trade {
     let spare = laborers_wanted(CITIZENS);
     if index < spare {
@@ -3237,6 +3472,7 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
                 held: [false; THOUGHT_COUNT],
                 hardship: 0.0,
                 spared_until: 0,
+                cheered_until: 0,
             },
         ));
     }
@@ -3490,6 +3726,73 @@ pub fn send_scouts(
     }
 }
 
+/// How the last performance went, so that a watcher can see the thing the
+/// entertainer's hour bought.
+#[derive(Resource)]
+pub struct Revels(pub Outcome);
+
+impl Default for Revels {
+    fn default() -> Self {
+        Self(Outcome::Boring)
+    }
+}
+
+/// The evening's entertainment.
+///
+/// An entertainer performs where they are standing, once a day, and the
+/// audience is whoever is close enough and warm enough to be listening rather
+/// than working. Everything about how it goes comes off the named terms, and
+/// what it pays is boredom lifted and -- when it went well -- a few days of
+/// somebody remembering it.
+pub fn perform(
+    tick: Res<Tick>,
+    air: Res<Air>,
+    mut revels: ResMut<Revels>,
+    mut citizens: Query<(&Pos, &mut Citizen)>,
+) {
+    if tick.0 % ticks_per_day() != PERFORMANCE_HOUR * TICKS_PER_HOUR {
+        return;
+    }
+    let stages: Vec<(IVec2, f32, u64)> = citizens
+        .iter()
+        .filter(|(_, citizen)| citizen.trade == Trade::Entertainer && is_adult(citizen.age))
+        .map(|(pos, citizen)| {
+            let raised = citizen.upbringing.stats().of(trade_stat(citizen.trade));
+            let fit = trade_fit(raised, citizen.experience[citizen.trade as usize]);
+            (
+                pos.0,
+                (raised * fit / FIT_CEILING).clamp(0.0, 1.0),
+                citizen.seed,
+            )
+        })
+        .collect();
+    for (stage, performer, seed) in stages {
+        let warmth = air.heat_at(stage);
+        let audience: Vec<IVec2> = citizens
+            .iter()
+            .filter(|(pos, _)| {
+                (pos.0 - stage).abs().max_element() <= PERFORMANCE_REACH
+                    && air.heat_at(pos.0) >= 0.0
+            })
+            .map(|(pos, _)| pos.0)
+            .collect();
+        // The tradition term is nothing until a colony has traditions.
+        let quality = performance_quality(audience.len(), warmth, performer, 0.0);
+        let outcome = performance_outcome(quality, WORLD_SEED, tick.0 ^ seed);
+        let cheered_until = tick.0 + outcome.mood_days() * ticks_per_day();
+        revels.0 = outcome;
+        for (pos, mut citizen) in &mut citizens {
+            if (pos.0 - stage).abs().max_element() > PERFORMANCE_REACH || air.heat_at(pos.0) < 0.0 {
+                continue;
+            }
+            citizen.needs.amuse(outcome.worth());
+            if outcome.went_well() {
+                citizen.cheered_until = citizen.cheered_until.max(cheered_until);
+            }
+        }
+    }
+}
+
 /// What a winter cost, weighed when it is over.
 ///
 /// A colony that has just buried a share of itself measures the next seasons
@@ -3602,7 +3905,21 @@ pub fn assign_trades(
     } else {
         Cargo::Wood
     };
-    let trade = trade_for(short);
+    // A vacancy goes to the entertainer only while the colony is not short of
+    // anything, which is ADR 0011's crisis rule expressed where the hours are
+    // actually handed out: an hour spent amusing is an hour not spent on wood,
+    // so it is spent on a plateau and never in a winter.
+    let comfortable = stock_share(stores.granary.food, FOOD_PER_CITIZEN, hands) >= 1.0
+        && stock_share(stores.generator.fuel, FUEL_PER_CITIZEN, hands) >= 1.0;
+    let players = citizens
+        .iter()
+        .filter(|(_, _, citizen)| is_adult(citizen.age) && citizen.trade == Trade::Entertainer)
+        .count();
+    let trade = if comfortable && players < entertainers_wanted(hands) {
+        Trade::Entertainer
+    } else {
+        trade_for(short)
+    };
     let stale = posting_is_stale(postings.days_short(short));
 
     let mut laborers = 0usize;
@@ -3819,6 +4136,7 @@ pub fn colony_growth(
                 held: [false; THOUGHT_COUNT],
                 hardship: 0.0,
                 spared_until: 0,
+                cheered_until: 0,
             },
         ));
     }
@@ -3899,20 +4217,33 @@ pub fn citizen_ai(
             colony.granary.food -= FOOD_PER_MEAL;
         }
         let warm = air.heat_at(pos.0) >= 0.0;
-        let met = [warm, duty == Duty::Rest && at_home, eating];
-        for (index, kind) in NEEDS.into_iter().enumerate() {
+        // Keyed by the need rather than positional, so a fourth need cannot be
+        // read off the end of a list of three. Recreation is never met by being
+        // anywhere: a performance lifts it and nothing else does.
+        for kind in NEEDS {
+            let met = match kind {
+                NeedKind::Warmth => warm,
+                NeedKind::Rest => duty == Duty::Rest && at_home,
+                NeedKind::Food => eating,
+                NeedKind::Recreation => false,
+            };
             let scale = if kind == NeedKind::Warmth && at_home {
                 SHELTER_DRAIN_FACTOR
             } else {
                 1.0
             };
-            citizen
-                .needs
-                .step(kind, met[index], scale, marks[kind as usize]);
+            citizen.needs.step(kind, met, scale, marks[kind as usize]);
         }
         // How they are bearing up, worked out from what is true of them and of
         // the colony rather than from anything this layer had to invent.
-        citizen.held = thoughts_of(&citizen.needs, &marks, fit < 1.0, somebody_missing, plenty);
+        citizen.held = thoughts_of(
+            &citizen.needs,
+            &marks,
+            fit < 1.0,
+            somebody_missing,
+            plenty,
+            tick.0 < citizen.cheered_until,
+        );
         citizen.mood = mood_step(
             citizen.mood,
             mood_target(&citizen.held, tick.0 < citizen.spared_until),
@@ -4073,6 +4404,7 @@ pub fn citizen_ai(
             Some(leg) if duty == Duty::Gather => leg,
             _ => duty_target(
                 duty,
+                citizen.trade,
                 air,
                 pos.0,
                 citizen.home,
@@ -4250,10 +4582,24 @@ mod tests {
     fn every_need_recovers_when_met_and_slips_when_it_is_not() {
         for kind in NEEDS {
             let half = need_at(NEED_MAX / 2.0);
-            assert!(
-                need_step(half, kind, true, 1.0, at_the_fire()[kind as usize]).level > half.level,
-                "{kind:?} must recover while it is being met"
-            );
+            // Recreation is the exception and deliberately so: it is filled by
+            // a thing happening rather than by a citizen being somewhere, so
+            // there is nothing for the ordinary recovery term to do.
+            if kind != NeedKind::Recreation {
+                assert!(
+                    need_step(half, kind, true, 1.0, at_the_fire()[kind as usize]).level
+                        > half.level,
+                    "{kind:?} must recover while it is being met"
+                );
+            } else {
+                let mut needs = Needs::newcomer();
+                set(&mut needs, kind, NEED_MAX / 2.0, false);
+                needs.amuse(10.0);
+                assert!(
+                    needs.level(kind) > NEED_MAX / 2.0,
+                    "{kind:?} must be liftable by attending something"
+                );
+            }
             assert!(
                 need_step(half, kind, false, 1.0, at_the_fire()[kind as usize]).level < half.level,
                 "{kind:?} must slip while it is neglected"
@@ -4382,9 +4728,10 @@ mod tests {
             let rules = kind.rules();
             assert!(rules.low < rules.high, "{kind:?} band is inverted");
             assert!(rules.high <= NEED_MAX, "{kind:?} can never stop pressing");
+            assert!(rules.decay > 0.0, "{kind:?} never falls, so it is inert");
             assert!(
-                rules.decay > 0.0 && rules.recovery > 0.0,
-                "{kind:?} is inert"
+                rules.recovery > 0.0 || kind == NeedKind::Recreation,
+                "{kind:?} has no way back up"
             );
             assert!(
                 rules.comfort > 0.0 && rules.comfort <= NEED_MAX,
@@ -4507,23 +4854,63 @@ mod tests {
         let patch = IVec2::new(1, 1);
         let lit = air(FULL_BURN_FUEL, 0);
         assert_eq!(
-            duty_target(Duty::WarmUp, &lit, CENTER, home, drop_off, Some(patch)),
+            duty_target(
+                Duty::WarmUp,
+                Trade::Laborer,
+                &lit,
+                CENTER,
+                home,
+                drop_off,
+                Some(patch)
+            ),
             CENTER
         );
         assert_eq!(
-            duty_target(Duty::Eat, &lit, CENTER, home, drop_off, Some(patch)),
+            duty_target(
+                Duty::Eat,
+                Trade::Laborer,
+                &lit,
+                CENTER,
+                home,
+                drop_off,
+                Some(patch)
+            ),
             CENTER
         );
         assert_eq!(
-            duty_target(Duty::Deliver, &lit, CENTER, home, drop_off, Some(patch)),
+            duty_target(
+                Duty::Deliver,
+                Trade::Laborer,
+                &lit,
+                CENTER,
+                home,
+                drop_off,
+                Some(patch)
+            ),
             drop_off
         );
         assert_eq!(
-            duty_target(Duty::Rest, &lit, CENTER, home, drop_off, Some(patch)),
+            duty_target(
+                Duty::Rest,
+                Trade::Laborer,
+                &lit,
+                CENTER,
+                home,
+                drop_off,
+                Some(patch)
+            ),
             home
         );
         assert_eq!(
-            duty_target(Duty::Gather, &lit, CENTER, home, drop_off, Some(patch)),
+            duty_target(
+                Duty::Gather,
+                Trade::Laborer,
+                &lit,
+                CENTER,
+                home,
+                drop_off,
+                Some(patch)
+            ),
             patch
         );
     }
@@ -4535,6 +4922,7 @@ mod tests {
         assert_eq!(
             duty_target(
                 Duty::Gather,
+                Trade::Laborer,
                 &air(FULL_BURN_FUEL, 0),
                 CENTER,
                 home,
@@ -4545,9 +4933,50 @@ mod tests {
             "while the fire burns, idle citizens huddle around it"
         );
         assert_eq!(
-            duty_target(Duty::Gather, &air(0, 0), CENTER, home, drop_off, None),
+            duty_target(
+                Duty::Gather,
+                Trade::Laborer,
+                &air(0, 0),
+                CENTER,
+                home,
+                drop_off,
+                None
+            ),
             home,
             "once it is out, the only shelter left is their own roof"
+        );
+    }
+
+    #[test]
+    fn an_entertainer_spends_the_day_where_the_evening_will_be() {
+        let home = IVec2::new(-5, -5);
+        let patch = IVec2::new(9, 9);
+        let lit = air(FULL_BURN_FUEL, 0);
+        assert_eq!(
+            duty_target(
+                Duty::Gather,
+                Trade::Laborer,
+                &lit,
+                home,
+                home,
+                home,
+                Some(patch)
+            ),
+            patch,
+            "every other trade walks to the work"
+        );
+        assert_eq!(
+            duty_target(
+                Duty::Gather,
+                Trade::Entertainer,
+                &lit,
+                home,
+                home,
+                home,
+                Some(patch)
+            ),
+            lit.warmth_target(home, home),
+            "an entertainer holds the warm ground instead, with work in reach"
         );
     }
 
@@ -4854,7 +5283,7 @@ mod tests {
     }
 
     #[test]
-    fn growth_needs_every_need_met_and_both_stores_at_target() {
+    fn growth_needs_the_needs_it_runs_on_met_and_both_stores_at_target() {
         let full = [1.0; NEED_COUNT];
         let pop = 30;
         let fuel = (pop as f32 * FUEL_PER_CITIZEN).ceil() as u32;
@@ -4862,7 +5291,7 @@ mod tests {
         assert!(colony_thrives(full, fuel, food, pop));
         assert!(!colony_thrives(full, 0, food, pop), "no wood");
         assert!(!colony_thrives(full, fuel, 0, pop), "no food");
-        for kind in NEEDS {
+        for kind in NEEDS.into_iter().filter(|kind| kind.is_survival()) {
             let mut shares = full;
             shares[kind as usize] = GROWTH_SHARE - 0.1;
             assert!(
@@ -4896,24 +5325,6 @@ mod tests {
             names.push(rules.name);
         }
         assert_eq!(names.len(), BUILDING_COUNT);
-    }
-
-    #[test]
-    fn every_need_has_a_building_of_its_own_that_answers_it() {
-        let mut answers = Vec::new();
-        for kind in NEEDS {
-            let building = building_for(kind);
-            assert!(!answers.contains(&building), "{kind:?} shares a remedy");
-            answers.push(building);
-        }
-        assert_eq!(answers.len(), NEED_COUNT);
-        // What is left over is elected by the other tier of the ballot: nothing
-        // going wrong asks for a waystation, only hours going to waste do.
-        let spare: Vec<Building> = BUILDINGS
-            .into_iter()
-            .filter(|building| !answers.contains(building))
-            .collect();
-        assert_eq!(spare, vec![Building::Waystation]);
     }
 
     fn mayor_leaning(building: Building, weight: f32) -> Mayor {
@@ -5970,7 +6381,7 @@ mod tests {
         assert!(needs.detour_burden() > needs.get(NeedKind::Food).burden);
         assert_eq!(
             vote_of(&needs),
-            Some(building_for(NeedKind::Food)),
+            building_for(NeedKind::Food),
             "the two tiers are never weighed against each other"
         );
     }
@@ -6006,7 +6417,7 @@ mod tests {
     fn equally_costly_needs_still_break_in_table_order() {
         let mut needs = owed(NeedKind::Rest, 42.0);
         needs.needs[NeedKind::Food as usize].burden = 42.0;
-        assert_eq!(vote_of(&needs), Some(building_for(NeedKind::Rest)));
+        assert_eq!(vote_of(&needs), building_for(NeedKind::Rest));
     }
 
     #[test]
@@ -6716,6 +7127,11 @@ mod tests {
                 "somebody has to fetch {trade:?}"
             );
         }
+        assert_eq!(
+            counts[Trade::Entertainer as usize],
+            0,
+            "the founding party is too lean to carry one"
+        );
     }
 
     #[test]
@@ -7952,6 +8368,63 @@ mod tests {
     }
 
     #[test]
+    fn a_bored_citizen_can_still_be_spared_to_go_looking() {
+        let mut needs = Needs::newcomer();
+        needs.needs[NeedKind::Recreation as usize].burden = 100.0;
+        assert!(
+            needs.nothing_failed(),
+            "boredom is not something the colony failed to answer"
+        );
+        for kind in NEEDS.into_iter().filter(|kind| kind.is_survival()) {
+            let mut needs = Needs::newcomer();
+            needs.needs[kind as usize].burden = 0.1;
+            assert!(
+                !needs.nothing_failed(),
+                "{kind:?} going unanswered still keeps somebody home"
+            );
+        }
+    }
+
+    #[test]
+    fn a_colony_with_nothing_to_do_of_an_evening_still_has_children() {
+        let mut shares = [1.0; NEED_COUNT];
+        shares[NeedKind::Recreation as usize] = 0.0;
+        assert!(
+            colony_thrives(shares, u32::MAX, u32::MAX, 30),
+            "a comfort need going unmet is not a reason for a colony to stop"
+        );
+        for kind in NEEDS.into_iter().filter(|kind| kind.is_survival()) {
+            let mut shares = [1.0; NEED_COUNT];
+            shares[kind as usize] = 0.0;
+            assert!(
+                !colony_thrives(shares, u32::MAX, u32::MAX, 30),
+                "{kind:?} going unmet across the colony still stops it"
+            );
+        }
+    }
+
+    #[test]
+    fn being_bored_costs_a_citizen_nothing_at_the_work() {
+        let mut bored = contented();
+        set(&mut bored, NeedKind::Recreation, 0.0, true);
+        assert_eq!(
+            focus_of(&bored),
+            focus_of(&contented()),
+            "a comfort need is not what stops somebody working"
+        );
+        let mut cold = contented();
+        set(&mut cold, NeedKind::Warmth, 0.0, true);
+        let mut cold_and_bored = cold;
+        set(&mut cold_and_bored, NeedKind::Recreation, 0.0, true);
+        assert_eq!(
+            focus_of(&cold_and_bored),
+            focus_of(&cold),
+            "and it does not dilute what does, either"
+        );
+        assert!(focus_of(&cold) < focus_of(&contented()));
+    }
+
+    #[test]
     fn a_citizen_with_nothing_the_matter_is_at_full_focus() {
         assert_eq!(focus_of(&contented()), 1.0, "nothing unmet, nothing lost");
         assert_eq!(
@@ -8008,13 +8481,20 @@ mod tests {
     }
 
     #[test]
-    fn every_need_the_colony_has_weighs_the_same_as_the_others() {
+    fn the_needs_that_kill_weigh_the_same_and_outweigh_the_one_that_does_not() {
         for kind in NEEDS {
-            assert_eq!(
-                kind.rules().weight,
-                NEED_WEIGHT_SURVIVAL,
-                "{kind:?} is not in the tier it belongs to"
-            );
+            let weight = kind.rules().weight;
+            if kind.rules().fatal || kind == NeedKind::Rest {
+                assert_eq!(
+                    weight, NEED_WEIGHT_SURVIVAL,
+                    "{kind:?} belongs to the tier a colony survives on"
+                );
+            } else {
+                assert!(
+                    weight < NEED_WEIGHT_SURVIVAL,
+                    "{kind:?} must not weigh what survival weighs"
+                );
+            }
         }
     }
 
@@ -8034,7 +8514,7 @@ mod tests {
     }
 
     fn nothing_the_matter() -> [bool; THOUGHT_COUNT] {
-        thoughts_of(&contented(), &at_the_fire(), false, false, true)
+        thoughts_of(&contented(), &at_the_fire(), false, false, true, false)
     }
 
     #[test]
@@ -8069,7 +8549,7 @@ mod tests {
 
     #[test]
     fn what_is_wrong_shows_up_by_name_and_not_only_in_the_total() {
-        let cold = thoughts_of(&all_at(1.0), &at_the_fire(), true, true, false);
+        let cold = thoughts_of(&all_at(1.0), &at_the_fire(), true, true, false, false);
         assert!(cold[Thought::Cold as usize]);
         assert!(cold[Thought::Hungry as usize]);
         assert!(cold[Thought::Worn as usize]);
@@ -8533,7 +9013,7 @@ mod tests {
 
     #[test]
     fn a_survivor_feels_the_same_cold_less() {
-        let bad = thoughts_of(&all_at(1.0), &at_the_fire(), true, true, false);
+        let bad = thoughts_of(&all_at(1.0), &at_the_fire(), true, true, false, false);
         let ordinary = mood_target(&bad, false);
         let spared = mood_target(&bad, true);
         assert!(
@@ -8545,7 +9025,7 @@ mod tests {
 
     #[test]
     fn what_is_going_right_is_worth_the_same_to_everybody() {
-        let good = thoughts_of(&contented(), &at_the_fire(), false, false, true);
+        let good = thoughts_of(&contented(), &at_the_fire(), false, false, true, false);
         assert_eq!(
             mood_target(&good, true),
             mood_target(&good, false),
@@ -8580,5 +9060,127 @@ mod tests {
             "it lasts the seasons it says it lasts"
         );
         assert!(until > began);
+    }
+
+    #[test]
+    fn wanting_to_be_amused_never_outranks_wanting_to_live() {
+        assert!(
+            NeedKind::Recreation.rules().weight < NEED_WEIGHT_SURVIVAL,
+            "recreation is not in the tier that kills"
+        );
+        assert!(
+            !NeedKind::Recreation.rules().fatal,
+            "and nobody dies of never being amused"
+        );
+        let mut needs = Needs::newcomer();
+        // Bored past bearing and hungry only just: hunger still wins.
+        set(&mut needs, NeedKind::Recreation, 0.0, true);
+        set(
+            &mut needs,
+            NeedKind::Food,
+            NeedKind::Food.rules().low - 0.5,
+            true,
+        );
+        assert_eq!(
+            needs.pressing_by_urgency(&at_the_fire())[0],
+            NeedKind::Food,
+            "a survival need outranks recreation whatever the shortfalls say"
+        );
+    }
+
+    #[test]
+    fn three_needs_have_a_building_for_a_remedy_and_the_fourth_has_a_person() {
+        let mut answered = Vec::new();
+        for kind in NEEDS {
+            match building_for(kind) {
+                Some(building) => {
+                    assert!(!answered.contains(&building), "{kind:?} shares a remedy");
+                    answered.push(building);
+                }
+                None => assert_eq!(
+                    kind,
+                    NeedKind::Recreation,
+                    "{kind:?} has nothing that answers it"
+                ),
+            }
+        }
+        assert_eq!(answered.len(), NEED_COUNT - 1);
+        // What is left over is elected by the other tier of the ballot: nothing
+        // going wrong asks for a waystation, only hours going to waste do.
+        let spare: Vec<Building> = BUILDINGS
+            .into_iter()
+            .filter(|building| !answered.contains(building))
+            .collect();
+        assert_eq!(spare, vec![Building::Waystation]);
+    }
+
+    #[test]
+    fn nothing_the_colony_can_build_answers_being_bored() {
+        let mut needs = Needs::newcomer();
+        set(&mut needs, NeedKind::Recreation, 0.0, true);
+        needs.needs[NeedKind::Recreation as usize].burden = 40.0;
+        assert_eq!(
+            vote_of(&needs),
+            None,
+            "a citizen with nothing wrong but boredom asks the ballot for nothing"
+        );
+    }
+
+    #[test]
+    fn a_performance_is_worth_what_it_is_made_of() {
+        let bare = performance_quality(0, -10.0, 0.2, 0.0);
+        let full = performance_quality(12, 5.0, 0.9, 1.0);
+        assert!(full > bare, "every term has to be able to move it");
+        assert!((0.0..=1.0).contains(&bare) && (0.0..=1.0).contains(&full));
+        assert!(
+            performance_quality(6, 5.0, 0.9, 1.0) > performance_quality(1, 5.0, 0.9, 1.0),
+            "an audience is one of the terms"
+        );
+        assert!(
+            performance_quality(6, 5.0, 0.9, 1.0) > performance_quality(6, -20.0, 0.9, 1.0),
+            "so is the warmth where they are standing"
+        );
+        assert!(
+            performance_quality(6, 5.0, 0.9, 1.0) > performance_quality(6, 5.0, 0.1, 1.0),
+            "and so is the performer"
+        );
+    }
+
+    #[test]
+    fn a_better_performance_more_often_goes_well() {
+        let over_many = |quality: f32| -> f32 {
+            let good = (0..2000)
+                .filter(|i| {
+                    matches!(
+                        performance_outcome(quality, WORLD_SEED, *i as u64),
+                        Outcome::Fun | Outcome::Unforgettable
+                    )
+                })
+                .count();
+            good as f32 / 2000.0
+        };
+        let poor = over_many(0.1);
+        let fine = over_many(0.9);
+        assert!(
+            fine > poor * 1.5,
+            "quality has to tell: {fine} against {poor}"
+        );
+        assert!(poor > 0.0, "and a poor night can still go well");
+        assert!(fine < 1.0, "and a good one can still fall flat");
+    }
+
+    #[test]
+    fn only_a_night_that_went_well_is_worth_anything() {
+        assert!(Outcome::Unforgettable.mood_days() > Outcome::Fun.mood_days());
+        assert_eq!(Outcome::Boring.mood_days(), 0);
+        assert_eq!(Outcome::Terrible.mood_days(), 0);
+        for outcome in [
+            Outcome::Terrible,
+            Outcome::Boring,
+            Outcome::Fun,
+            Outcome::Unforgettable,
+        ] {
+            assert!(!outcome.name().is_empty());
+        }
     }
 }

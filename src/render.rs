@@ -5,9 +5,9 @@
 use bevy::prelude::*;
 
 use crate::sim::{
-    BUILDINGS, Cargo, Citizen, FORMATION_NEUTRAL, MOOD_BASE, Patches, Pos, Regard, STAT_COUNT,
-    STATS, Structure, estimate, focus_band, focus_of, hardship_status, is_known, median, on_frame,
-    regard_of, world_is_bounded,
+    BUILDINGS, Cargo, Citizen, FORMATION_NEUTRAL, MOOD_BASE, Patches, Pos, Regard, Revels,
+    STAT_COUNT, STATS, Structure, estimate, focus_band, focus_of, hardship_status, is_known,
+    median, on_frame, regard_of, world_is_bounded,
 };
 use crate::status::{CitizenCard, Readings, Status, status_lines};
 
@@ -23,6 +23,7 @@ pub fn hold_the_world_bound(patches: Res<Patches>) {
 
 pub fn print_status(
     readings: Readings,
+    revels: Res<Revels>,
     structures: Query<&Structure>,
     citizens: Query<&Citizen>,
     walkers: Query<&Pos, With<Citizen>>,
@@ -89,6 +90,7 @@ pub fn print_status(
         ages,
         stats,
         mood,
+        revel: revels.0.name(),
         card,
     };
     for line in status_lines(&status) {
