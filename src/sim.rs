@@ -46,7 +46,7 @@ pub const GROWTH_RESTED_SHARE: f32 = 0.6;
 // Every block of citizens the generator has to warm costs another log per cycle,
 // so growth is paid for twice: once in timber, then forever in fuel.
 pub const POP_PER_EXTRA_BURN: usize = 20;
-pub const NEWCOMER_WARMTH: f32 = 80.0;
+pub const START_WARMTH: f32 = 80.0;
 
 #[derive(Resource, Default)]
 pub struct Tick(pub u64);
@@ -280,8 +280,8 @@ pub fn colony_thrives(warm_share: f32, rested_share: f32, fuel: u32) -> bool {
     warm_share >= GROWTH_WARM_SHARE && rested_share >= GROWTH_RESTED_SHARE && fuel >= BIRTH_FUEL_MIN
 }
 
-/// Lowest unbuilt plot, so a demolished or skipped gap is filled before the
-/// colony sprawls into the next ring.
+/// Lowest plot with no house on it. Houses only ever go up, so this is simply
+/// the next slot in the ring order.
 pub fn next_house_site(existing: &[IVec2]) -> Option<IVec2> {
     (0usize..)
         .map(house_site)
@@ -307,7 +307,7 @@ pub fn setup(mut commands: Commands) {
         commands.spawn((
             Pos(ring_pos(2.0, angle)),
             Citizen {
-                warmth: 80.0,
+                warmth: START_WARMTH,
                 fatigue: 0.0,
                 home,
                 carrying: false,
@@ -392,7 +392,7 @@ pub fn colony_growth(
     commands.spawn((
         Pos(CENTER),
         Citizen {
-            warmth: NEWCOMER_WARMTH,
+            warmth: START_WARMTH,
             fatigue: 0.0,
             home,
             carrying: false,
