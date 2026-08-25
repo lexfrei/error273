@@ -429,6 +429,14 @@ pub const MOOD_FALL_PER_DAY: f32 = 8.0;
 /// it has to climb before one starts to fade. Two marks and not one, per ADR
 /// 0003: the gap between them is what stops a citizen's history flickering with
 /// their afternoon.
+/// Left where it was, and deliberately. Swept over four values on six worlds
+/// against a world that can hurt: at 30 and 40 nobody is ever marked, and at 50
+/// and 60 everybody is, up to sixty-one at once. There is no value between that
+/// gives the rare mark this is for, because the colony's misery is brief rather
+/// than sustained -- a mood sits near fifty and dips to twenty for days, and
+/// this is built to record years. What it is waiting for is a mechanic that
+/// produces prolonged hardship rather than sharp shocks, and moving the mark
+/// would not produce one.
 pub const HARDSHIP_MARK: f32 = 30.0;
 pub const HARDSHIP_EASE: f32 = 70.0;
 pub const HARDSHIP_MAX: f32 = 100.0;
@@ -440,7 +448,20 @@ pub const HARDSHIP_GAIN_PER_YEAR: f32 = 40.0;
 pub const HARDSHIP_FADE_PER_YEAR: f32 = 8.0;
 pub const FOCUS_KNEE: f32 = 15.0;
 /// How much heavier a point of a need costs below the knee than above it.
-pub const FOCUS_KNEE_BITE: f32 = 1.0;
+///
+/// Chosen against a world that can hurt, which is what it was waiting for, and
+/// chosen on the instrument rather than on the arc: over twelve worlds the arc
+/// cannot tell 0.5, 1.0 and 1.5 apart -- three live seeds and the wins split --
+/// while the number itself is three times livelier at 0.5, visibly below full
+/// focus on 264 days across those worlds against 92 at 1.0.
+///
+/// It runs the way round it does because the bite is in the normalisation as
+/// well as in the term: a heavier bite raises what the worst possible case
+/// costs, which makes every ordinary shortfall a smaller share of it. Trading
+/// away the ordinary range to sharpen the extreme is the wrong trade for a
+/// number whose whole purpose is to explain an underperformance before it
+/// becomes a collapse.
+pub const FOCUS_KNEE_BITE: f32 = 0.5;
 /// Where the bands fall. Display only: the value underneath is continuous, and
 /// nothing in the simulation reads a band.
 pub const FOCUS_UNFOCUSED: f32 = 0.95;
