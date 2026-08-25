@@ -175,7 +175,8 @@ mod knob_tests {
 
 /// The lengths a watcher can put a tick at, from the keyboard. A ladder rather
 /// than a free number because the point is to change speed at a glance, and
-/// each rung is double the one below so the whole range is six presses wide.
+/// each rung is double the one below, so the whole range is walked end to end in
+/// one press fewer than there are rungs.
 ///
 /// Window only: the headless build has no input, and a run whose tempo can be
 /// changed mid-flight is not the instrument the balance log reads.

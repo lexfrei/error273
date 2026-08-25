@@ -657,8 +657,9 @@ impl Thought {
     }
 
     /// What holding this does to where a mood is headed. The two that can kill
-    /// weigh most; the one good thing here is worth less than any single bad
-    /// one, which is the asymmetry the shape this is taken from has.
+    /// weigh most, and the one good thing here weighs no more than the lightest
+    /// of the bad ones, which is the asymmetry the shape this is taken from has:
+    /// what goes wrong is felt harder than what goes right.
     pub fn weight(self) -> f32 {
         match self {
             Thought::Cold => -18.0,
