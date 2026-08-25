@@ -105,6 +105,12 @@ pub const WOOD_PER_CELL: u32 = 50;
 pub const FOOD_CELLS: usize = 4;
 pub const FOOD_PER_CELL: u32 = 60;
 
+// What the colony starts with. These belong beside the rates they are tuned
+// against, not in the app wiring.
+pub const START_FUEL: u32 = 20;
+pub const START_FOOD: u32 = 60;
+pub const START_RING: f32 = 2.0;
+
 pub const NEED_MAX: f32 = 100.0;
 pub const NEED_COUNT: usize = 3;
 pub const START_WARMTH: f32 = 80.0;
@@ -774,7 +780,7 @@ pub fn setup(mut commands: Commands) {
         homes.push(home);
         let angle = i as f32 / CITIZENS as f32 * std::f32::consts::TAU;
         commands.spawn((
-            Pos(ring_pos(2.0, angle)),
+            Pos(ring_pos(START_RING, angle)),
             Citizen {
                 needs: Needs::founder(i, CITIZENS),
                 home,
@@ -2057,5 +2063,18 @@ mod tests {
             takes_a_meal(&desperate, true, FOOD_PER_MEAL),
             "but nobody starves standing on the granary"
         );
+    }
+
+    #[test]
+    fn every_founder_starts_inside_the_warm_ring() {
+        let output = generator_output(START_FUEL, 0);
+        for i in 0..CITIZENS {
+            let angle = i as f32 / CITIZENS as f32 * std::f32::consts::TAU;
+            let start = ring_pos(START_RING, angle);
+            assert!(
+                heat_at(start, output) >= 0.0,
+                "a founder must not start out in the cold"
+            );
+        }
     }
 }
