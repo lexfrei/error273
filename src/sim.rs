@@ -134,6 +134,10 @@ pub const START_RING: f32 = 2.0;
 
 pub const NEED_MAX: f32 = 100.0;
 pub const NEED_COUNT: usize = 3;
+/// The warmth a citizen keeps in hand on top of the walk home. It is set to the
+/// mark warmth used to act on, so a citizen standing at the fire behaves exactly
+/// as they always did and only distance changes anything.
+pub const CAUTION_BASE: f32 = 25.0;
 pub const START_WARMTH: f32 = 80.0;
 // A house is shelter, not a stove: it only slows the bleed of body heat.
 pub const SHELTER_DRAIN_FACTOR: f32 = 0.7;
@@ -829,23 +833,66 @@ pub struct Need {
     pub burden: f32,
 }
 
-/// How far through its own tolerance band a need at `level` has fallen: zero at
-/// the mark where a citizen stops acting on it, one where they start.
-pub fn shortfall_of(kind: NeedKind, level: f32) -> f32 {
-    let rules = kind.rules();
-    (rules.high - level) / (rules.high - rules.low)
+/// Where a need's two marks stand for one citizen right now: the level they
+/// start acting at and the level they stop at.
+#[derive(Debug, Clone, Copy)]
+pub struct Marks {
+    pub low: f32,
+    pub high: f32,
 }
 
-pub fn need_step(need: Need, kind: NeedKind, met: bool, decay_scale: f32) -> Need {
+/// The marks a citizen is working to, given what the walk home would cost them
+/// and the margin they keep on top of it.
+///
+/// Warmth is the one need answered by walking, so it is the one whose marks have
+/// to know where the citizen is standing: a controller comparing a level against
+/// a fixed number has no term for how far away its actuator is, and turns for
+/// home on schedule from a distance that schedule cannot cover. ADR 0003 is
+/// amended for this -- a threshold is a constant or a pure function of position,
+/// and what the ADR guarantees is the gap between the marks, not their value.
+pub fn marks_of(kind: NeedKind, home_cost: f32, margin: f32) -> Marks {
+    let rules = kind.rules();
+    match kind {
+        NeedKind::Warmth => Marks {
+            low: home_cost + margin,
+            high: home_cost + margin + (rules.high - rules.low),
+        },
+        _ => Marks {
+            low: rules.low,
+            high: rules.high,
+        },
+    }
+}
+
+/// Every need's marks for one citizen, worked out once so that nothing asks the
+/// same question twice in a tick.
+pub fn marks_for(home_cost: f32, margin: f32) -> [Marks; NEED_COUNT] {
+    let mut marks = [Marks {
+        low: 0.0,
+        high: 0.0,
+    }; NEED_COUNT];
+    for kind in NEEDS {
+        marks[kind as usize] = marks_of(kind, home_cost, margin);
+    }
+    marks
+}
+
+/// How far through its own tolerance band a need at `level` has fallen: zero at
+/// the mark where a citizen stops acting on it, one where they start.
+pub fn shortfall_at(marks: Marks, level: f32) -> f32 {
+    (marks.high - level) / (marks.high - marks.low)
+}
+
+pub fn need_step(need: Need, kind: NeedKind, met: bool, decay_scale: f32, marks: Marks) -> Need {
     let rules = kind.rules();
     let level = if met {
         (need.level + rules.recovery).min(NEED_MAX)
     } else {
         (need.level - rules.decay * decay_scale).max(0.0)
     };
-    let pressing = if level <= rules.low {
+    let pressing = if level <= marks.low {
         true
-    } else if level >= rules.high {
+    } else if level >= marks.high {
         false
     } else {
         need.pressing
@@ -855,7 +902,7 @@ pub fn need_step(need: Need, kind: NeedKind, met: bool, decay_scale: f32) -> Nee
         pressing,
         // Only the part past the point of acting counts: a citizen already on
         // their way to the fire or the granary is not being failed yet.
-        burden: need.burden + (shortfall_of(kind, level) - 1.0).max(0.0),
+        burden: need.burden + (shortfall_at(marks, level) - 1.0).max(0.0),
     }
 }
 
@@ -904,8 +951,8 @@ impl Needs {
         self.get(kind).level
     }
 
-    pub fn step(&mut self, kind: NeedKind, met: bool, decay_scale: f32) {
-        self.needs[kind as usize] = need_step(self.get(kind), kind, met, decay_scale);
+    pub fn step(&mut self, kind: NeedKind, met: bool, decay_scale: f32, marks: Marks) {
+        self.needs[kind as usize] = need_step(self.get(kind), kind, met, decay_scale, marks);
     }
 
     /// True once a need that can kill has bottomed out.
@@ -919,8 +966,8 @@ impl Needs {
     /// the mark where they stop acting on it, one where they start, and past one
     /// when it is worse than that. Bands differ per need, so this is what makes
     /// hunger and cold comparable at all.
-    pub fn shortfall(&self, kind: NeedKind) -> f32 {
-        shortfall_of(kind, self.level(kind))
+    pub fn shortfall(&self, kind: NeedKind, marks: Marks) -> f32 {
+        shortfall_at(marks, self.level(kind))
     }
 
     /// Draw a line under the season: from here the ballot remembers only what
@@ -953,12 +1000,15 @@ impl Needs {
 
     /// Pressing needs, worst first. The sort is stable, so equally short needs
     /// keep `NEEDS` order and the same colony state always decides the same way.
-    pub fn pressing_by_urgency(&self) -> Vec<NeedKind> {
+    pub fn pressing_by_urgency(&self, marks: &[Marks; NEED_COUNT]) -> Vec<NeedKind> {
         let mut pressing: Vec<NeedKind> = NEEDS
             .into_iter()
             .filter(|kind| self.get(*kind).pressing)
             .collect();
-        pressing.sort_by(|a, b| self.shortfall(*b).total_cmp(&self.shortfall(*a)));
+        pressing.sort_by(|a, b| {
+            self.shortfall(*b, marks[*b as usize])
+                .total_cmp(&self.shortfall(*a, marks[*a as usize]))
+        });
         pressing
     }
 }
@@ -1492,6 +1542,51 @@ pub fn regrowth_step(amount: u32, cap: u32, kind: Cargo, growing: bool) -> u32 {
     (amount + regrowth_per_day(kind)).min(cap)
 }
 
+pub fn fire_reach(air: Air) -> f32 {
+    air.reach()
+}
+
+/// Ticks a citizen would spend in the cold walking home from here.
+///
+/// The two shapes involved do not line up, and that is the whole of the
+/// arithmetic. A citizen walks one king move a tick, so the walk is counted in
+/// Chebyshev steps; the warm ring is a Euclidean disc, because that is how
+/// `heat_at` measures. Along the path `step_toward` takes, both axes close by
+/// one a tick until the shorter runs out, so the citizen crosses into the ring
+/// either on the diagonal stretch or on the straight one that follows it. Whole
+/// ticks, rounded up, because a citizen cannot spend part of one in the cold.
+pub fn cost_of_getting_home(at: IVec2, air: Air) -> f32 {
+    let reach = fire_reach(air);
+    let away = (at - CENTER).abs();
+    let far = away.max_element() as f32;
+    let near = away.min_element() as f32;
+    if far * far + near * near <= reach * reach {
+        return 0.0;
+    }
+    // The straight stretch, once the shorter axis has run out.
+    let straight = far - reach;
+    if straight >= near {
+        return straight.ceil();
+    }
+    // The diagonal stretch: both axes close together, so the crossing is the
+    // smaller root of `(far - k)^2 + (near - k)^2 = reach^2`.
+    let sum = far + near;
+    let gap = far - near;
+    ((sum - (2.0 * reach * reach - gap * gap).max(0.0).sqrt()) / 2.0).ceil()
+}
+
+/// The margin a citizen keeps on top of the walk home.
+///
+/// There is one base and nothing moves it yet. Under ADR 0017 caution above the
+/// base comes only from the tradition cards a citizen carries, so that every
+/// cautious citizen is cautious for a reason a watcher can read off them; the
+/// card an expedition death leaves behind is the first one there will be, and
+/// it arrives with the culture layer rather than here. This is where it reaches
+/// in.
+pub fn caution_margin(_citizen: &Citizen) -> f32 {
+    CAUTION_BASE
+}
+
 pub fn generator_output(fuel: u32, upgrades: usize) -> f32 {
     let ceiling = GENERATOR_HEAT + upgrades as f32 * UPGRADE_HEAT;
     (fuel as f32 / FULL_BURN_FUEL as f32).min(1.0) * ceiling
@@ -1511,6 +1606,12 @@ impl Air {
         (self.output - d * HEAT_FALLOFF).max(0.0) + self.ambient
     }
 
+    /// How far out the fire's heat still clears the air: the last ring of cells
+    /// at which a citizen stops losing warmth.
+    pub fn reach(self) -> f32 {
+        ((self.output + self.ambient) / HEAT_FALLOFF).max(0.0)
+    }
+
     /// The nearest warmth worth walking to: the generator while it still heats
     /// the square, otherwise the citizen's own roof.
     pub fn warmth_target(self, home: IVec2) -> IVec2 {
@@ -1528,8 +1629,13 @@ pub fn step_toward(from: IVec2, to: IVec2) -> IVec2 {
 
 /// The most urgent thing a citizen could be doing. A need that kills outranks
 /// the load on their back; tiredness does not.
-pub fn choose_duty(needs: &Needs, carrying: Option<Cargo>, grown: bool) -> Duty {
-    for kind in needs.pressing_by_urgency() {
+pub fn choose_duty(
+    needs: &Needs,
+    carrying: Option<Cargo>,
+    grown: bool,
+    marks: &[Marks; NEED_COUNT],
+) -> Duty {
+    for kind in needs.pressing_by_urgency(marks) {
         match kind {
             NeedKind::Warmth => return Duty::WarmUp,
             NeedKind::Food => return Duty::Eat,
@@ -2251,7 +2357,8 @@ pub fn regrow_patches(tick: Res<Tick>, calendar: Res<Calendar>, mut patches: Res
 }
 
 /// The colony keeps only the world it is standing in. Everything else goes back
-/// to being a seed and a handful of remembered cuts.
+/// to being a seed and the cuts it remembers -- and those are the half that does
+/// not shrink when the colony moves on, which is why the ceiling counts them.
 pub fn forget_far_world(
     tick: Res<Tick>,
     mut patches: ResMut<Patches>,
@@ -2559,7 +2666,10 @@ pub fn citizen_ai(
         let at_home = pos.0 == citizen.home;
         let at_centre = (pos.0 - CENTER).abs().max_element() <= 1;
         let grown = is_adult(citizen.age);
-        let duty = choose_duty(&citizen.needs, citizen.carrying, grown);
+        // What the walk home would cost from where they are standing, which is
+        // what warmth's marks are measured against rather than a fixed number.
+        let marks = marks_for(cost_of_getting_home(pos.0, air), caution_margin(&citizen));
+        let duty = choose_duty(&citizen.needs, citizen.carrying, grown, &marks);
 
         // Eating is what makes the food need met this tick, so it happens before
         // the needs are stepped.
@@ -2575,7 +2685,9 @@ pub fn citizen_ai(
             } else {
                 1.0
             };
-            citizen.needs.step(kind, met[index], scale);
+            citizen
+                .needs
+                .step(kind, met[index], scale, marks[kind as usize]);
         }
         if citizen.needs.spent() {
             commands.entity(entity).despawn();
@@ -2675,7 +2787,7 @@ pub fn citizen_ai(
 
         // Handing a load over or picking one up flips this tick's duty; nothing
         // else about the citizen has changed since it was chosen.
-        let duty = choose_duty(&citizen.needs, citizen.carrying, grown);
+        let duty = choose_duty(&citizen.needs, citizen.carrying, grown, &marks);
         // Only a working citizen has working hours for the cold to take.
         if grown {
             citizen.needs.spend(duty == Duty::WarmUp);
@@ -2736,11 +2848,17 @@ mod tests {
         }
     }
 
+    /// The marks of a citizen standing at the fire, which are the fixed ones the
+    /// colony worked to before warmth learned where it was.
+    fn at_the_fire() -> [Marks; NEED_COUNT] {
+        marks_for(0.0, CAUTION_BASE)
+    }
+
     fn set(needs: &mut Needs, kind: NeedKind, level: f32, pressing: bool) {
         needs.needs[kind as usize] = Need {
             level,
             pressing,
-            burden: shortfall_of(kind, level).max(0.0),
+            burden: shortfall_at(at_the_fire()[kind as usize], level).max(0.0),
         };
     }
 
@@ -2812,12 +2930,20 @@ mod tests {
             let rules = kind.rules();
             let mut needs = Needs::newcomer();
             set(&mut needs, kind, rules.high, false);
-            assert_eq!(needs.shortfall(kind), 0.0, "{kind:?} at the high mark");
+            assert_eq!(
+                needs.shortfall(kind, at_the_fire()[kind as usize]),
+                0.0,
+                "{kind:?} at the high mark"
+            );
             set(&mut needs, kind, rules.low, true);
-            assert_eq!(needs.shortfall(kind), 1.0, "{kind:?} at the low mark");
+            assert_eq!(
+                needs.shortfall(kind, at_the_fire()[kind as usize]),
+                1.0,
+                "{kind:?} at the low mark"
+            );
             set(&mut needs, kind, 0.0, true);
             assert!(
-                needs.shortfall(kind) > 1.0,
+                needs.shortfall(kind, at_the_fire()[kind as usize]) > 1.0,
                 "{kind:?} can be worse than the band"
             );
         }
@@ -2829,10 +2955,10 @@ mod tests {
         for kind in NEEDS {
             set(&mut needs, kind, kind.rules().low, true);
         }
-        let first = needs.shortfall(NEEDS[0]);
+        let first = needs.shortfall(NEEDS[0], at_the_fire()[NEEDS[0] as usize]);
         for kind in NEEDS {
             assert_eq!(
-                needs.shortfall(kind),
+                needs.shortfall(kind, at_the_fire()[kind as usize]),
                 first,
                 "every need at its own low mark is equally short"
             );
@@ -2844,11 +2970,11 @@ mod tests {
         for kind in NEEDS {
             let half = need_at(NEED_MAX / 2.0);
             assert!(
-                need_step(half, kind, true, 1.0).level > half.level,
+                need_step(half, kind, true, 1.0, at_the_fire()[kind as usize]).level > half.level,
                 "{kind:?} must recover while it is being met"
             );
             assert!(
-                need_step(half, kind, false, 1.0).level < half.level,
+                need_step(half, kind, false, 1.0, at_the_fire()[kind as usize]).level < half.level,
                 "{kind:?} must slip while it is neglected"
             );
         }
@@ -2858,18 +2984,40 @@ mod tests {
     fn no_need_runs_past_full_or_below_empty() {
         for kind in NEEDS {
             assert_eq!(
-                need_step(need_at(NEED_MAX), kind, true, 1.0).level,
+                need_step(
+                    need_at(NEED_MAX),
+                    kind,
+                    true,
+                    1.0,
+                    at_the_fire()[kind as usize]
+                )
+                .level,
                 NEED_MAX
             );
-            assert_eq!(need_step(need_at(0.0), kind, false, 1.0).level, 0.0);
+            assert_eq!(
+                need_step(need_at(0.0), kind, false, 1.0, at_the_fire()[kind as usize]).level,
+                0.0
+            );
         }
     }
 
     #[test]
     fn shelter_slows_a_neglected_need_without_reversing_it() {
         let start = need_at(NEED_MAX / 2.0);
-        let exposed = need_step(start, NeedKind::Warmth, false, 1.0);
-        let sheltered = need_step(start, NeedKind::Warmth, false, SHELTER_DRAIN_FACTOR);
+        let exposed = need_step(
+            start,
+            NeedKind::Warmth,
+            false,
+            1.0,
+            at_the_fire()[NeedKind::Warmth as usize],
+        );
+        let sheltered = need_step(
+            start,
+            NeedKind::Warmth,
+            false,
+            SHELTER_DRAIN_FACTOR,
+            at_the_fire()[NeedKind::Warmth as usize],
+        );
         assert!(
             sheltered.level > exposed.level,
             "a home must blunt the cold"
@@ -2881,8 +3029,22 @@ mod tests {
     fn recovery_ignores_the_decay_scale() {
         let start = need_at(NEED_MAX / 2.0);
         assert_eq!(
-            need_step(start, NeedKind::Warmth, true, SHELTER_DRAIN_FACTOR).level,
-            need_step(start, NeedKind::Warmth, true, 1.0).level
+            need_step(
+                start,
+                NeedKind::Warmth,
+                true,
+                SHELTER_DRAIN_FACTOR,
+                at_the_fire()[NeedKind::Warmth as usize]
+            )
+            .level,
+            need_step(
+                start,
+                NeedKind::Warmth,
+                true,
+                1.0,
+                at_the_fire()[NeedKind::Warmth as usize]
+            )
+            .level
         );
     }
 
@@ -2891,7 +3053,7 @@ mod tests {
         for kind in NEEDS {
             let rules = kind.rules();
             let mid = (rules.low + rules.high) / 2.0;
-            let calm = need_step(need_at(mid), kind, false, 1.0);
+            let calm = need_step(need_at(mid), kind, false, 1.0, at_the_fire()[kind as usize]);
             assert!(
                 !calm.pressing || calm.level <= rules.low,
                 "{kind:?} must not start pressing while still inside its band"
@@ -2901,12 +3063,21 @@ mod tests {
                 pressing: true,
                 burden: 0.0,
             };
-            let tended = need_step(latched, kind, true, 1.0);
+            let tended = need_step(latched, kind, true, 1.0, at_the_fire()[kind as usize]);
             assert!(
                 tended.pressing || tended.level >= rules.high,
                 "{kind:?} must not stop pressing while still inside its band"
             );
-            assert!(need_step(need_at(rules.low), kind, false, 1.0).pressing);
+            assert!(
+                need_step(
+                    need_at(rules.low),
+                    kind,
+                    false,
+                    1.0,
+                    at_the_fire()[kind as usize]
+                )
+                .pressing
+            );
             assert!(
                 !need_step(
                     Need {
@@ -2916,7 +3087,8 @@ mod tests {
                     },
                     kind,
                     true,
-                    1.0
+                    1.0,
+                    at_the_fire()[kind as usize]
                 )
                 .pressing
             );
@@ -2946,7 +3118,13 @@ mod tests {
         let mut flips = 0;
         let mut ticks = 0;
         while flips < 2 && ticks < 10_000 {
-            let next = need_step(need, NeedKind::Rest, need.pressing, 1.0);
+            let next = need_step(
+                need,
+                NeedKind::Rest,
+                need.pressing,
+                1.0,
+                at_the_fire()[NeedKind::Rest as usize],
+            );
             if next.pressing != need.pressing {
                 flips += 1;
             }
@@ -2983,7 +3161,7 @@ mod tests {
             set(&mut needs, kind, kind.rules().low - 1.0, true);
         }
         set(&mut needs, NeedKind::Food, 1.0, true);
-        let order = needs.pressing_by_urgency();
+        let order = needs.pressing_by_urgency(&at_the_fire());
         assert_eq!(order.len(), NEED_COUNT);
         assert_eq!(order[0], NeedKind::Food, "the emptiest need leads");
     }
@@ -2992,7 +3170,7 @@ mod tests {
     fn a_calm_citizen_presses_for_nothing() {
         let needs = Needs::newcomer();
         assert!(
-            needs.pressing_by_urgency().is_empty(),
+            needs.pressing_by_urgency(&at_the_fire()).is_empty(),
             "a fresh citizen has no complaints"
         );
     }
@@ -3004,7 +3182,7 @@ mod tests {
             set(&mut needs, kind, kind.rules().low, true);
         }
         assert_eq!(
-            needs.pressing_by_urgency(),
+            needs.pressing_by_urgency(&at_the_fire()),
             vec![NeedKind::Rest, NeedKind::Food]
         );
     }
@@ -3014,15 +3192,15 @@ mod tests {
         let mut needs = Needs::newcomer();
         set(&mut needs, NeedKind::Rest, NeedKind::Rest.rules().low, true);
         assert_eq!(
-            choose_duty(&needs, Some(Cargo::Wood), true),
+            choose_duty(&needs, Some(Cargo::Wood), true, &at_the_fire()),
             Duty::Deliver,
             "wood is dropped off before bed"
         );
-        assert_eq!(choose_duty(&needs, None, true), Duty::Rest);
+        assert_eq!(choose_duty(&needs, None, true, &at_the_fire()), Duty::Rest);
 
         set(&mut needs, NeedKind::Food, 1.0, true);
         assert_eq!(
-            choose_duty(&needs, Some(Cargo::Wood), true),
+            choose_duty(&needs, Some(Cargo::Wood), true, &at_the_fire()),
             Duty::Eat,
             "a starving citizen puts the load down"
         );
@@ -3031,8 +3209,14 @@ mod tests {
     #[test]
     fn a_citizen_with_nothing_pressing_goes_to_work() {
         let needs = Needs::newcomer();
-        assert_eq!(choose_duty(&needs, None, true), Duty::Gather);
-        assert_eq!(choose_duty(&needs, Some(Cargo::Food), true), Duty::Deliver);
+        assert_eq!(
+            choose_duty(&needs, None, true, &at_the_fire()),
+            Duty::Gather
+        );
+        assert_eq!(
+            choose_duty(&needs, Some(Cargo::Food), true, &at_the_fire()),
+            Duty::Deliver
+        );
     }
 
     #[test]
@@ -3865,11 +4049,12 @@ mod tests {
         set(&mut desperate, NeedKind::Food, 25.0, true);
         set(&mut desperate, NeedKind::Warmth, 2.0, true);
         assert!(
-            desperate.shortfall(NeedKind::Warmth) > desperate.shortfall(NeedKind::Food),
+            desperate.shortfall(NeedKind::Warmth, at_the_fire()[NeedKind::Warmth as usize])
+                > desperate.shortfall(NeedKind::Food, at_the_fire()[NeedKind::Food as usize]),
             "this citizen is worse off for cold than for hunger"
         );
         assert_eq!(
-            choose_duty(&desperate, None, true),
+            choose_duty(&desperate, None, true, &at_the_fire()),
             Duty::WarmUp,
             "so the cold is what they walk towards"
         );
@@ -4088,9 +4273,9 @@ mod tests {
     #[test]
     fn a_child_stays_out_of_the_way_instead_of_going_to_work() {
         let calm = Needs::newcomer();
-        assert_eq!(choose_duty(&calm, None, true), Duty::Gather);
+        assert_eq!(choose_duty(&calm, None, true, &at_the_fire()), Duty::Gather);
         assert_eq!(
-            choose_duty(&calm, None, false),
+            choose_duty(&calm, None, false, &at_the_fire()),
             Duty::Rest,
             "children are mouths, not hands, until they are grown"
         );
@@ -4105,7 +4290,7 @@ mod tests {
             NeedKind::Food.rules().low,
             true,
         );
-        assert_eq!(choose_duty(&hungry, None, false), Duty::Eat);
+        assert_eq!(choose_duty(&hungry, None, false, &at_the_fire()), Duty::Eat);
         let mut cold = Needs::newcomer();
         set(
             &mut cold,
@@ -4113,7 +4298,10 @@ mod tests {
             NeedKind::Warmth.rules().low,
             true,
         );
-        assert_eq!(choose_duty(&cold, None, false), Duty::WarmUp);
+        assert_eq!(
+            choose_duty(&cold, None, false, &at_the_fire()),
+            Duty::WarmUp
+        );
     }
 
     #[test]
@@ -4449,7 +4637,13 @@ mod tests {
         need.burden = 0.0;
         // A full working cycle: down to the low mark, then slept off.
         for tick in 0..200 {
-            need = need_step(need, kind, need.level <= kind.rules().low || tick > 60, 1.0);
+            need = need_step(
+                need,
+                kind,
+                need.level <= kind.rules().low || tick > 60,
+                1.0,
+                at_the_fire()[kind as usize],
+            );
         }
         assert_eq!(
             need.burden, 0.0,
@@ -4463,12 +4657,12 @@ mod tests {
         let mut need = need_at(kind.rules().low);
         need.burden = 0.0;
         for _ in 0..100 {
-            need = need_step(need, kind, false, 1.0);
+            need = need_step(need, kind, false, 1.0, at_the_fire()[kind as usize]);
         }
         assert!(need.burden > 0.0, "a hunger nobody answers is what costs");
         let owed = need.burden;
         for _ in 0..500 {
-            need = need_step(need, kind, true, 1.0);
+            need = need_step(need, kind, true, 1.0, at_the_fire()[kind as usize]);
         }
         assert_eq!(
             need.burden, owed,
@@ -5826,5 +6020,115 @@ mod tests {
             assignment_score(WALK_UNFOUND, 0.5, 0.0) <= assignment_score(furthest, 0.5, 0.0),
             "a spare hand with nowhere to go must not be the best candidate"
         );
+    }
+
+    fn mean_day() -> Air {
+        Air {
+            output: GENERATOR_HEAT,
+            ambient: AMBIENT_MEAN,
+        }
+    }
+
+    /// The walk home counted the way a citizen actually takes it: one king move
+    /// a tick, losing warmth wherever the fire does not reach.
+    fn walked_home(at: IVec2, air: Air) -> f32 {
+        let mut pos = at;
+        let mut cold = 0.0;
+        while pos != CENTER {
+            if air.heat_at(pos) < 0.0 {
+                cold += 1.0;
+            }
+            pos = step_toward(pos, CENTER);
+        }
+        cold
+    }
+
+    #[test]
+    fn the_walk_home_is_counted_the_way_a_citizen_walks_it() {
+        for air in [
+            mean_day(),
+            Air {
+                output: GENERATOR_HEAT,
+                ambient: AMBIENT_MEAN - AMBIENT_SWING,
+            },
+        ] {
+            for x in -70..=70 {
+                for y in -70..=70 {
+                    let at = CENTER + IVec2::new(x, y);
+                    assert_eq!(
+                        cost_of_getting_home(at, air),
+                        walked_home(at, air),
+                        "the closed form disagrees with the walk at {x},{y}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_citizen_inside_the_warm_ring_has_no_walk_to_pay_for() {
+        let air = mean_day();
+        assert_eq!(cost_of_getting_home(CENTER, air), 0.0);
+        let rim = CENTER + IVec2::new(fire_reach(air) as i32, 0);
+        assert_eq!(cost_of_getting_home(rim, air), 0.0, "the rim is still warm");
+    }
+
+    #[test]
+    fn the_old_mark_kills_a_citizen_fifty_ticks_from_the_fire() {
+        let air = mean_day();
+        let out = CENTER + IVec2::new(63, 0);
+        let cost = cost_of_getting_home(out, air);
+        assert_eq!(cost, 50.0, "fifty ticks of cold between here and the fire");
+
+        let fixed = NeedKind::Warmth.rules().low;
+        assert_eq!(
+            cost - fixed,
+            25.0,
+            "turning for home at the fixed mark dies twenty-five ticks short"
+        );
+
+        let looked_ahead = marks_of(NeedKind::Warmth, cost, CAUTION_BASE).low;
+        assert_eq!(
+            looked_ahead - cost,
+            CAUTION_BASE,
+            "and turning on the walk home arrives with the margin still in hand"
+        );
+    }
+
+    #[test]
+    fn a_citizen_at_the_fire_keeps_the_marks_they_always_had() {
+        let rules = NeedKind::Warmth.rules();
+        let marks = marks_of(NeedKind::Warmth, 0.0, CAUTION_BASE);
+        assert_eq!(marks.low, rules.low, "nothing about the hearth changes");
+        assert_eq!(marks.high, rules.high);
+    }
+
+    #[test]
+    fn the_gap_between_the_marks_is_what_never_moves() {
+        for kind in NEEDS {
+            let rules = kind.rules();
+            let band = rules.high - rules.low;
+            for cost in [0.0, 7.0, 50.0, 160.0] {
+                let marks = marks_of(kind, cost, CAUTION_BASE);
+                assert_eq!(
+                    marks.high - marks.low,
+                    band,
+                    "{kind:?} lost the gap hysteresis exists to protect"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_warmth_knows_where_it_is_standing() {
+        for kind in NEEDS {
+            let rules = kind.rules();
+            let far = marks_of(kind, 50.0, CAUTION_BASE);
+            if kind == NeedKind::Warmth {
+                assert!(far.low > rules.low, "warmth has to read the walk home");
+            } else {
+                assert_eq!(far.low, rules.low, "{kind:?} is not answered by walking");
+            }
+        }
     }
 }
