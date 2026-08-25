@@ -276,9 +276,11 @@ impl NeedKind {
 pub struct Need {
     pub level: f32,
     pub pressing: bool,
-    /// What this need has cost its citizen since the last ballot: shortfall
-    /// summed over every tick of it, so depth and duration both count. A night's
-    /// tiredness answered by morning weighs little; a week of hunger adds up.
+    /// What this need has cost its citizen since the last ballot: the time spent
+    /// already acting on it and still not relieved, summed. A need that a
+    /// citizen answers by sleeping or eating costs nothing at all -- the point
+    /// is not discomfort but control failing, and a need swinging through its
+    /// own band on schedule is control working.
     pub burden: f32,
 }
 
@@ -306,9 +308,9 @@ pub fn need_step(need: Need, kind: NeedKind, met: bool, decay_scale: f32) -> Nee
     Need {
         level,
         pressing,
-        // Comfort does not pay off past suffering, so a need above its high
-        // mark adds nothing rather than subtracting.
-        burden: need.burden + shortfall_of(kind, level).max(0.0),
+        // Only the part past the point of acting counts: a citizen already on
+        // their way to the fire or the granary is not being failed yet.
+        burden: need.burden + (shortfall_of(kind, level) - 1.0).max(0.0),
     }
 }
 
@@ -1017,34 +1019,39 @@ pub fn building_for(kind: NeedKind) -> Building {
     }
 }
 
-/// How one citizen votes: for whatever answers whichever of their needs has
-/// cost them most since the last ballot, or for a boiler if the walk back to
-/// the fire cost more than any of them. Cost is shortfall summed over time, so
-/// a need answered every night weighs less than one left for a week even though
-/// both bottom out at the same depth. The strict comparisons keep the first of
-/// any equals, so ties resolve in table order.
-pub fn vote_of(needs: &Needs) -> Building {
+/// How one citizen votes, in two tiers that are never compared. First
+/// survival: a need they were already acting on and still not getting, summed
+/// over the hours it stayed that way. If anything shows there, that is the
+/// vote. Only a citizen the colony is holding up for gets to the second tier,
+/// efficiency, and votes on what wastes the most of their day -- or abstains,
+/// which is a legal thing for a contented citizen to do. The strict comparison
+/// keeps the first of any equals, so ties resolve in table order.
+pub fn vote_of(needs: &Needs) -> Option<Building> {
     let mut choice = NEEDS[0];
     for kind in NEEDS {
         if needs.get(kind).burden > needs.get(choice).burden {
             choice = kind;
         }
     }
-    // Three needs that went unmet and one cost that was paid, all in the same
-    // currency: a citizen who spent the season walking back to the fire says so,
-    // even though they were never once left cold.
-    if needs.detour_burden() > needs.get(choice).burden {
-        return Building::GeneratorUpgrade;
+    if needs.get(choice).burden > 0.0 {
+        return Some(building_for(choice));
     }
-    building_for(choice)
+    // Nothing went unanswered, so the colony is holding for this citizen and
+    // the question is no longer survival but waste. The two are never compared:
+    // a starving colony votes food whatever its haulers are walking, and a
+    // comfortable one is free to spend the ballot on efficiency.
+    if needs.detour_burden() > 0.0 {
+        return Some(Building::GeneratorUpgrade);
+    }
+    None
 }
 
 /// The ballot: one voice each, on top of whatever the mayor's office is
 /// leaning on. The mayor does not get a vote, only a thumb on the scale.
 pub fn tally_votes(people: &[Needs], mayor: &Mayor) -> [f32; BUILDING_COUNT] {
     let mut tally = mayor.bias;
-    for needs in people {
-        tally[vote_of(needs) as usize] += 1.0;
+    for needs in people.iter().filter_map(vote_of) {
+        tally[needs as usize] += 1.0;
     }
     tally
 }
@@ -2301,22 +2308,6 @@ mod tests {
     }
 
     #[test]
-    fn a_citizen_votes_for_whatever_answers_its_own_worst_need() {
-        for kind in NEEDS {
-            assert_eq!(vote_of(&voter_short_on(kind)), building_for(kind));
-        }
-    }
-
-    #[test]
-    fn a_citizen_short_on_nothing_in_particular_votes_in_table_order() {
-        let mut needs = Needs::newcomer();
-        for kind in NEEDS {
-            set(&mut needs, kind, kind.rules().high, false);
-        }
-        assert_eq!(vote_of(&needs), building_for(NEEDS[0]));
-    }
-
-    #[test]
     fn the_tally_counts_one_voice_each() {
         let people = [
             voter_short_on(NeedKind::Food),
@@ -3289,105 +3280,98 @@ mod tests {
         );
     }
 
-    /// Run a need for `ticks`, met or not, and hand back what it cost.
-    fn burden_after(kind: NeedKind, from: f32, ticks: usize, met: bool) -> f32 {
-        let mut need = need_at(from);
-        need.burden = 0.0;
-        for _ in 0..ticks {
-            need = need_step(need, kind, met, 1.0);
-        }
-        need.burden
+    /// A citizen with `burden` owed on `kind` and nothing else the matter.
+    fn owed(kind: NeedKind, burden: f32) -> Needs {
+        let mut needs = Needs::newcomer();
+        needs.needs[kind as usize].burden = burden;
+        needs
     }
 
     #[test]
-    fn a_need_left_alone_costs_more_the_longer_it_is_left() {
-        let kind = NeedKind::Food;
-        let short = burden_after(kind, kind.rules().low, 20, false);
-        let long = burden_after(kind, kind.rules().low, 200, false);
-        assert!(short > 0.0);
-        assert!(
-            long > short * 5.0,
-            "cost is depth times duration, not depth"
+    fn a_need_answered_on_schedule_costs_nothing_at_all() {
+        let kind = NeedKind::Rest;
+        let mut need = need_at(kind.rules().high);
+        need.burden = 0.0;
+        // A full working cycle: down to the low mark, then slept off.
+        for tick in 0..200 {
+            need = need_step(need, kind, need.level <= kind.rules().low || tick > 60, 1.0);
+        }
+        assert_eq!(
+            need.burden, 0.0,
+            "a need swinging through its own band on schedule is control working"
         );
     }
 
     #[test]
-    fn a_burden_once_owed_is_never_paid_back() {
-        let kind = NeedKind::Rest;
+    fn a_need_left_unanswered_starts_costing_once_it_is_past_acting_on() {
+        let kind = NeedKind::Food;
         let mut need = need_at(kind.rules().low);
         need.burden = 0.0;
-        let mut owed = 0.0;
-        for tick in 0..600 {
-            need = need_step(need, kind, tick >= 50, 1.0);
-            assert!(
-                need.burden >= owed,
-                "the ledger went backwards at tick {tick}"
-            );
-            owed = need.burden;
-        }
-        assert_eq!(need.level, NEED_MAX, "and it did recover");
-        let settled = need.burden;
         for _ in 0..100 {
+            need = need_step(need, kind, false, 1.0);
+        }
+        assert!(need.burden > 0.0, "a hunger nobody answers is what costs");
+        let owed = need.burden;
+        for _ in 0..500 {
             need = need_step(need, kind, true, 1.0);
         }
         assert_eq!(
-            need.burden, settled,
-            "a need fully met stops adding to what it cost"
+            need.burden, owed,
+            "and being fed later does not pay it back"
         );
     }
 
     #[test]
-    fn a_week_of_hunger_outvotes_a_tiredness_answered_every_night() {
-        let mut needs = Needs::newcomer();
-        // Rest bottoms out as deep as hunger does, but is met by morning.
-        needs.needs[NeedKind::Rest as usize].burden =
-            burden_after(NeedKind::Rest, NeedKind::Rest.rules().low, 12, true);
-        needs.needs[NeedKind::Food as usize].burden =
-            burden_after(NeedKind::Food, NeedKind::Food.rules().low, 168, false);
+    fn survival_outranks_efficiency_however_long_the_walk_was() {
+        let mut needs = owed(NeedKind::Food, 0.5);
+        for _ in 0..5000 {
+            needs.spend(true);
+        }
+        assert!(needs.detour_burden() > needs.get(NeedKind::Food).burden);
         assert_eq!(
             vote_of(&needs),
-            building_for(NeedKind::Food),
-            "the same depth, left standing for a week, is the one that costs"
+            Some(building_for(NeedKind::Food)),
+            "the two tiers are never weighed against each other"
         );
     }
 
     #[test]
-    fn a_winter_of_walking_back_to_the_fire_asks_for_a_boiler() {
+    fn a_citizen_the_colony_is_holding_up_votes_on_what_wastes_its_day() {
         let mut needs = Needs::newcomer();
-        needs.needs[NeedKind::Rest as usize].burden =
-            burden_after(NeedKind::Rest, NeedKind::Rest.rules().low, 12, true);
-        for tick in 0..600 {
-            needs.spend(tick % 3 == 0);
-        }
-        assert!(needs.detour_burden() > 0.0);
-        assert_eq!(vote_of(&needs), Building::GeneratorUpgrade);
-    }
-
-    #[test]
-    fn a_citizen_who_never_left_the_warm_votes_its_needs() {
-        let mut needs = Needs::newcomer();
-        needs.needs[NeedKind::Rest as usize].burden = 40.0;
-        for _ in 0..600 {
-            needs.spend(false);
-        }
-        assert_eq!(needs.detour_burden(), 0.0);
-        assert_eq!(vote_of(&needs), building_for(NeedKind::Rest));
-    }
-
-    #[test]
-    fn a_need_that_cost_more_than_the_walk_still_wins() {
-        let mut needs = Needs::newcomer();
-        needs.needs[NeedKind::Food as usize].burden = 500.0;
         for _ in 0..100 {
             needs.spend(true);
         }
-        assert_eq!(vote_of(&needs), building_for(NeedKind::Food));
+        assert_eq!(vote_of(&needs), Some(Building::GeneratorUpgrade));
+    }
+
+    #[test]
+    fn a_citizen_with_nothing_the_matter_abstains() {
+        assert_eq!(
+            vote_of(&Needs::newcomer()),
+            None,
+            "contentment is a legal ballot"
+        );
+    }
+
+    #[test]
+    fn an_abstaining_colony_leaves_the_docket_empty() {
+        let quiet = [Needs::newcomer(), Needs::newcomer()];
+        assert_eq!(
+            tally_votes(&quiet, &Mayor::default()),
+            [0.0; BUILDING_COUNT]
+        );
+    }
+
+    #[test]
+    fn equally_costly_needs_still_break_in_table_order() {
+        let mut needs = owed(NeedKind::Rest, 42.0);
+        needs.needs[NeedKind::Food as usize].burden = 42.0;
+        assert_eq!(vote_of(&needs), Some(building_for(NeedKind::Rest)));
     }
 
     #[test]
     fn the_ballot_forgets_both_the_needs_and_the_hours() {
-        let mut needs = Needs::newcomer();
-        needs.needs[NeedKind::Food as usize].burden = 500.0;
+        let mut needs = owed(NeedKind::Food, 500.0);
         for _ in 0..100 {
             needs.spend(true);
         }
@@ -3396,14 +3380,6 @@ mod tests {
             assert_eq!(needs.get(kind).burden, 0.0, "{kind:?} still owed");
         }
         assert_eq!(needs.detour_burden(), 0.0);
-    }
-
-    #[test]
-    fn equally_costly_needs_still_break_in_table_order() {
-        let mut needs = Needs::newcomer();
-        for kind in [NeedKind::Rest, NeedKind::Food] {
-            needs.needs[kind as usize].burden = 42.0;
-        }
-        assert_eq!(vote_of(&needs), building_for(NeedKind::Rest));
+        assert_eq!(vote_of(&needs), None);
     }
 }
