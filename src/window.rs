@@ -14,7 +14,7 @@ use bevy::window::WindowResolution;
 use crate::sim::{
     Air, BUILDINGS, Building, CENTER, Cargo, Citizen, Construction, GENERATOR_HEAT, NeedKind,
     Patches, Pos, Regard, STAT_COUNT, STATS, Structure, VIEW_RADIUS, estimate, focus_band,
-    focus_of, is_known, median, on_frame, regard_of,
+    focus_of, hardship_status, is_known, median, on_frame, regard_of,
 };
 use crate::status::{CitizenCard, Readings, STATUS_LINES, Status, status_lines};
 
@@ -226,6 +226,8 @@ fn paint_status(
             .collect();
         stats[stat as usize] = median(&mut held);
     }
+    let mut moods: Vec<f32> = citizens.iter().map(|citizen| citizen.mood).collect();
+    let mood = median(&mut moods);
     let card = citizens
         .iter()
         .max_by(|a, b| a.age.total_cmp(&b.age))
@@ -243,6 +245,7 @@ fn paint_status(
                 focus: focus_band(focus_of(&citizen.needs)),
                 mood: citizen.mood,
                 held: citizen.held,
+                hardship: hardship_status(citizen.hardship),
                 seed: citizen.seed,
                 age: citizen.age,
                 words,
@@ -270,6 +273,7 @@ fn paint_status(
         tally: readings.ballot.tally,
         ages,
         stats,
+        mood,
         card,
     };
     let painted = status_lines(&status);

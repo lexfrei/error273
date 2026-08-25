@@ -150,6 +150,8 @@ Separate from focus, and deliberately so. Focus is what is wrong with a citizen 
 
 A mood is two numbers as well. There is where it is headed, which is worked out instantly from everything the citizen is holding -- cold, hungry, worn out, badly matched to their work, somebody gone and not come back, a colony with something put by. Each of those is a named thing rather than a figure folded into a total, so the colony can say why somebody is low and not only that they are. And there is the number itself, which chases that target rather than jumping to it, faster upward than down, and stands still while its owner is asleep. The rates are per day: at an hour a tick, a mood that moved by the hour would sit on its target permanently and the chase would be arithmetic with nothing on the end of it.
 
+Under the mood and far slower there is what the years have actually done to somebody. A mood is about a day and forgets one; this keeps what is left when enough days have gone the same way, deepening only while a mood stays low and fading only while it stays high, with a gap between those two marks so that a citizen's history does not flicker with their afternoon. It is measured in years both ways and it fades far slower than it fills, because a thing that heals in a season is a mood by another name.
+
 Nothing acts on a mood yet. The ballot keeps its own two currencies -- what a need cost somebody and what a walk wasted -- until there is a layer that gives a mood somewhere to go. It is printed first so that what is happening to people is visible before anything happens because of it.
 
 ### The year

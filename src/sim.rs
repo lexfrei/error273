@@ -341,6 +341,19 @@ pub const MOOD_MAX: f32 = 100.0;
 /// quicker, which is the shape of the bar this is taken from.
 pub const MOOD_RISE_PER_DAY: f32 = 12.0;
 pub const MOOD_FALL_PER_DAY: f32 = 8.0;
+/// How far a mood has to fall before the days start leaving a mark, and how far
+/// it has to climb before one starts to fade. Two marks and not one, per ADR
+/// 0003: the gap between them is what stops a citizen's history flickering with
+/// their afternoon.
+pub const HARDSHIP_MARK: f32 = 30.0;
+pub const HARDSHIP_EASE: f32 = 70.0;
+pub const HARDSHIP_MAX: f32 = 100.0;
+/// How deep a mark gets in a year of misery, and how much of one a year of
+/// contentment takes back. The second is far smaller on purpose: a bar that
+/// recovers as fast as it fills is the mood over again, and what this is for is
+/// the part of somebody that the mood has already stopped explaining.
+pub const HARDSHIP_GAIN_PER_YEAR: f32 = 40.0;
+pub const HARDSHIP_FADE_PER_YEAR: f32 = 8.0;
 pub const FOCUS_KNEE: f32 = 15.0;
 /// How much heavier a point of a need costs below the knee than above it.
 pub const FOCUS_KNEE_BITE: f32 = 1.0;
@@ -712,6 +725,55 @@ pub fn mood_step(mood: f32, target: f32, asleep: bool) -> f32 {
         target
     } else {
         (mood + step).clamp(0.0, MOOD_MAX)
+    }
+}
+
+/// What a life has done to somebody, under the mood and much slower than it.
+///
+/// A mood is about a day and forgets one; this is what is left when enough days
+/// have gone the same way, and it is measured in years because a thing that
+/// heals in a season is a mood by another name. It is the clock the tradition
+/// cards will run on when the culture layer arrives.
+pub fn hardship_step(hardship: f32, mood: f32) -> f32 {
+    let step = if mood < HARDSHIP_MARK {
+        per_year(HARDSHIP_GAIN_PER_YEAR)
+    } else if mood > HARDSHIP_EASE {
+        -per_year(HARDSHIP_FADE_PER_YEAR)
+    } else {
+        0.0
+    };
+    (hardship + step).clamp(0.0, HARDSHIP_MAX)
+}
+
+/// What the colony would call that. Display only, like the focus bands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hardship {
+    Untouched,
+    Worn,
+    Marked,
+    Broken,
+}
+
+impl Hardship {
+    pub fn name(self) -> &'static str {
+        match self {
+            Hardship::Untouched => "untouched",
+            Hardship::Worn => "worn",
+            Hardship::Marked => "marked",
+            Hardship::Broken => "broken",
+        }
+    }
+}
+
+pub fn hardship_status(hardship: f32) -> Hardship {
+    if hardship < HARDSHIP_MAX * 0.1 {
+        Hardship::Untouched
+    } else if hardship < HARDSHIP_MAX * 0.4 {
+        Hardship::Worn
+    } else if hardship < HARDSHIP_MAX * 0.75 {
+        Hardship::Marked
+    } else {
+        Hardship::Broken
     }
 }
 
@@ -1847,6 +1909,9 @@ pub struct Citizen {
     /// worked out again by whoever prints it, because the inputs are half the
     /// colony and a second copy of that sum is a second answer waiting to differ.
     pub held: [bool; THOUGHT_COUNT],
+    /// What the years have done to them, under the mood and far slower. The
+    /// culture layer will read this; nothing does yet.
+    pub hardship: f32,
     /// Where this citizen is walking to look, if the colony has sent them out.
     /// A scout brings back the map and nothing else.
     pub scouting: Option<IVec2>,
@@ -2845,6 +2910,7 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
                 scouting: None,
                 mood: MOOD_BASE,
                 held: [false; THOUGHT_COUNT],
+                hardship: 0.0,
             },
         ));
     }
@@ -3356,6 +3422,7 @@ pub fn colony_growth(
                 scouting: None,
                 mood: MOOD_BASE,
                 held: [false; THOUGHT_COUNT],
+                hardship: 0.0,
             },
         ));
     }
@@ -3455,6 +3522,7 @@ pub fn citizen_ai(
             mood_target(&citizen.held),
             duty == Duty::Rest && at_home,
         );
+        citizen.hardship = hardship_step(citizen.hardship, citizen.mood);
         if citizen.needs.spent() {
             colony.missing.take_note(pos.0, tick.0);
             commands.entity(entity).despawn();
@@ -7657,5 +7725,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_bad_year_leaves_a_mark_and_a_good_one_does_not() {
+        assert!(
+            hardship_step(0.0, HARDSHIP_MARK - 1.0) > 0.0,
+            "misery accumulates"
+        );
+        assert_eq!(
+            hardship_step(0.0, HARDSHIP_EASE + 1.0),
+            0.0,
+            "and contentment has nothing to take away yet"
+        );
+        assert!(
+            hardship_step(50.0, HARDSHIP_EASE + 1.0) < 50.0,
+            "but it does take away what is there"
+        );
+    }
+
+    #[test]
+    fn between_the_marks_a_mark_neither_deepens_nor_fades() {
+        let middle = (HARDSHIP_MARK + HARDSHIP_EASE) / 2.0;
+        assert_eq!(hardship_step(50.0, middle), 50.0);
+        // The gap between the two marks is what stops it flickering, per ADR 0003.
+        const _: () = assert!(HARDSHIP_EASE > HARDSHIP_MARK);
+    }
+
+    #[test]
+    fn what_a_bad_decade_does_takes_a_worse_one_to_undo() {
+        let gained = hardship_step(0.0, 0.0);
+        let faded = 50.0 - hardship_step(50.0, MOOD_MAX);
+        assert!(
+            gained > faded * 3.0,
+            "a mark has to be made faster than it is unmade: {gained} against {faded}"
+        );
+    }
+
+    #[test]
+    fn a_mark_takes_years_to_make_and_longer_to_lose() {
+        let mut hardship = 0.0;
+        let mut years = 0;
+        while hardship < HARDSHIP_MAX && years < 100 {
+            for _ in 0..ticks_per_year() {
+                hardship = hardship_step(hardship, 0.0);
+            }
+            years += 1;
+        }
+        assert!(
+            (2..=6).contains(&years),
+            "a life of misery should mark somebody in a few years, took {years}"
+        );
+        let mut clearing = 0;
+        while hardship > 0.0 && clearing < 100 {
+            for _ in 0..ticks_per_year() {
+                hardship = hardship_step(hardship, MOOD_MAX);
+            }
+            clearing += 1;
+        }
+        assert!(
+            clearing > years * 2,
+            "and losing it should take far longer: {clearing} against {years}"
+        );
+    }
+
+    #[test]
+    fn a_mark_never_leaves_its_own_range() {
+        let mut hardship = 0.0;
+        for _ in 0..ticks_per_year() * 40 {
+            hardship = hardship_step(hardship, 0.0);
+            assert!((0.0..=HARDSHIP_MAX).contains(&hardship));
+        }
+        for _ in 0..ticks_per_year() * 80 {
+            hardship = hardship_step(hardship, MOOD_MAX);
+            assert!((0.0..=HARDSHIP_MAX).contains(&hardship));
+        }
+    }
+
+    #[test]
+    fn every_depth_of_a_mark_has_a_word_for_it() {
+        assert_eq!(hardship_status(0.0), Hardship::Untouched);
+        assert_eq!(hardship_status(HARDSHIP_MAX), Hardship::Broken);
+        let mut seen = Vec::new();
+        for step in 0..=100 {
+            let status = hardship_status(HARDSHIP_MAX * step as f32 / 100.0);
+            if seen.last() != Some(&status) {
+                seen.push(status);
+            }
+            assert!(!status.name().is_empty());
+        }
+        assert_eq!(seen.len(), 4, "four words, walked bottom to top, each once");
     }
 }

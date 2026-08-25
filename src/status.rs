@@ -3,8 +3,8 @@ use bevy::prelude::*;
 
 use crate::sim::{
     ADULT_AGE, BUILDING_COUNT, BUILDINGS, Ballot, Building, CENTER, Calendar, Cargo, Construction,
-    FRAILTY_ONSET, Focus, Missing, NEAR_GROUND, Outside, Patches, Regard, STAT_COUNT, STATS,
-    Stores, THOUGHT_COUNT, THOUGHTS, Thought, couples, is_adult,
+    FRAILTY_ONSET, Focus, Hardship, Missing, NEAR_GROUND, Outside, Patches, Regard, STAT_COUNT,
+    STATS, Stores, THOUGHT_COUNT, THOUGHTS, Thought, couples, is_adult,
 };
 
 pub const STATUS_LINES: usize = 5;
@@ -60,6 +60,9 @@ pub struct Status {
     /// The middle of the colony for each stat. An aggregate, not a reveal: what
     /// any one citizen is stays hidden until the colony has watched them work.
     pub stats: [f32; STAT_COUNT],
+    /// The middle of the colony, the same kind of aggregate as the stats beside
+    /// it: what any one citizen feels stays on their own card.
+    pub mood: f32,
     /// One citizen, described the way the colony would describe them.
     pub card: Option<CitizenCard>,
 }
@@ -80,6 +83,9 @@ pub struct CitizenCard {
     /// Printed rather than acted on: nothing in the colony reads a mood yet.
     pub mood: f32,
     pub held: [bool; THOUGHT_COUNT],
+    /// What the years have done to them, which the mood has already stopped
+    /// explaining. Printed as a word, like the focus band.
+    pub hardship: Hardship,
 }
 
 /// The five lines under the map, and the whole of what the headless build
@@ -141,7 +147,7 @@ pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
             votes.join("/")
         ),
         format!(
-            "under {:<2} {:3}  grown {:3}  over {:<2} {:3}  couples {:3}  raised {}",
+            "under {:<2} {:3}  grown {:3}  over {:<2} {:3}  couples {:3}  raised {}  mood {:3.0}",
             ADULT_AGE as u32,
             children,
             status.alive.saturating_sub(children + frail),
@@ -152,11 +158,12 @@ pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
                 .into_iter()
                 .map(|stat| format!("{:.2}", status.stats[stat as usize]))
                 .collect::<Vec<String>>()
-                .join("/")
+                .join("/"),
+            status.mood
         ),
         match &status.card {
             Some(card) => format!(
-                "eldest #{:<3} {:2.0}y  {}  {:<16} mood {:3.0} {:<28} watched {:3.0}d {}",
+                "eldest #{:<3} {:2.0}y  {}  {:<16} mood {:3.0} {:<9} {:<28} watched {:3.0}d {}",
                 card.seed,
                 card.age,
                 STATS
@@ -170,6 +177,7 @@ pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
                     .join(" "),
                 card.focus.name(),
                 card.mood,
+                card.hardship.name(),
                 THOUGHTS
                     .into_iter()
                     .filter(|thought| card.held[*thought as usize])
