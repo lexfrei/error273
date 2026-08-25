@@ -156,7 +156,10 @@ fn spawn_board(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
     }
     commands.spawn((
         TempoLine,
-        Text2d::new(""),
+        // Set here as well as on a keypress: a run launched with the environment
+        // variable at something other than the default has to say so before
+        // anybody touches a key.
+        Text2d::new(tempo_shown(crate::tempo::tick_step().as_millis() as u64)),
         TextFont::from_font_size(STATUS_SIZE).with_font(font.clone()),
         TextColor(INK_STATUS),
         Anchor::CENTER_RIGHT,
@@ -185,6 +188,17 @@ fn spawn_board(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
 /// started. There is deliberately no pause -- stopping the clock raises what
 /// happens to the wall-clock grid when it starts again, which is a different
 /// question from how fast to run and is not answered here.
+/// What the readout says at a given tick length: nothing at all when it is the
+/// one the game starts at, because a line that is always there stops being
+/// something a watcher notices.
+fn tempo_shown(ms: u64) -> String {
+    if ms == TICK_MS_DEFAULT {
+        String::new()
+    } else {
+        format!("{ms} ms/tick")
+    }
+}
+
 fn take_tempo_keys(
     keys: Res<ButtonInput<KeyCode>>,
     mut tempo: ResMut<Tempo>,
@@ -212,9 +226,7 @@ fn take_tempo_keys(
     fixed.set_timestep(Duration::from_millis(next));
     for mut text in &mut shown {
         text.clear();
-        if next != TICK_MS_DEFAULT {
-            text.push_str(&format!("{next} ms/tick"));
-        }
+        text.push_str(&tempo_shown(next));
     }
 }
 
