@@ -55,6 +55,7 @@ fn main() {
                 sim::forget_far_world,
                 sim::record_trend,
                 sim::assign_trades,
+                sim::send_scouts,
                 sim::construction,
                 sim::citizen_ai,
                 sim::colony_growth,

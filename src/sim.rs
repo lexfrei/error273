@@ -1,6 +1,6 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // Nested game clocks. How fast a tick arrives in real time is a separate knob
 // in the app wiring; these four numbers define game time and nothing else.
@@ -185,12 +185,21 @@ pub const WOOD_SHARE: f32 = 2.0 / 3.0;
 /// How far the generated field is allowed to move a patch's worth either way.
 pub const FIELD_SWING: f32 = 0.5;
 pub const CHUNK_SALT: u64 = 0x61;
+pub const SCOUT_TURN_SALT: u64 = 0x63;
+pub const SCOUT_PICK_SALT: u64 = 0x64;
 pub const FIELD_SALT: u64 = 0x62;
-/// How many chunks out from the hearth's own the colony starts with realised.
-pub const FOUNDING_REACH: i32 = 1;
 /// As far as anybody walks for work. Past here the ground stops getting better
 /// for the walk, so there is nothing out there worth the extra cold.
 pub const SEARCH_LIMIT: i32 = RICHNESS_BEST;
+/// The shortest leg a scout draws, and the longest. The tail between them goes
+/// as one over the square of the distance, which is the search-theory answer for
+/// sparse targets that are worth revisiting; the cap is where the ground stops
+/// getting better, so nothing is drawn that nobody would walk.
+pub const SCOUT_STEP_MIN: i32 = 8;
+pub const SCOUT_STEP_MAX: i32 = SEARCH_LIMIT;
+/// How many of the colony's hands may be out looking rather than working.
+pub const SCOUT_SHARE: f32 = 0.04;
+
 /// How far out the colony's day-to-day work actually happens. Nothing enforces
 /// it -- a citizen may walk to the limit -- but it is where the ground the
 /// colony lives off stands, so it is what the status columns total and what the
@@ -994,6 +1003,13 @@ impl Needs {
         self.detour as f32
     }
 
+    /// Whether nothing has gone unanswered since the last ballot. It is the
+    /// test the survival tier of the vote applies, asked directly: a citizen it
+    /// has nothing to say about is one the colony can spare for looking.
+    pub fn nothing_failed(&self) -> bool {
+        NEEDS.into_iter().all(|kind| self.get(kind).burden == 0.0)
+    }
+
     pub fn comfortable(&self, kind: NeedKind) -> bool {
         self.level(kind) >= kind.rules().comfort
     }
@@ -1126,6 +1142,11 @@ pub struct Patches {
     seed: u64,
     chunks: BTreeMap<(i32, i32), Held>,
     worked: BTreeMap<(i32, i32), u32>,
+    /// Chunks somebody has stood in. Knowing a chunk is not the same as holding
+    /// it: memory is dropped when nobody is near and drawn again from the seed,
+    /// but the colony does not forget that it has been somewhere. Haulers work
+    /// known ground only, which is the whole of what a scout's walk buys.
+    known: BTreeSet<(i32, i32)>,
 }
 
 /// The Chebyshev distance from a cell to the nearest cell of a chunk: how close
@@ -1165,9 +1186,30 @@ impl Patches {
             seed,
             chunks: BTreeMap::new(),
             worked: BTreeMap::new(),
+            known: BTreeSet::new(),
         };
-        world.realise_around(CENTER, FOUNDING_REACH * CHUNK);
+        // A founding party knows the ground it lives off and nothing beyond it.
+        // Everything further has to be walked to before it can be worked.
+        let low = chunk_of(CENTER - IVec2::splat(NEAR_GROUND));
+        let high = chunk_of(CENTER + IVec2::splat(NEAR_GROUND));
+        for x in low.x..=high.x {
+            for y in low.y..=high.y {
+                world.discover(IVec2::new(x, y) * CHUNK);
+            }
+        }
         world
+    }
+
+    /// Whether anybody has stood in this chunk.
+    pub fn has_been_to(&self, chunk: IVec2) -> bool {
+        self.known.contains(&key(chunk))
+    }
+
+    /// Somebody is standing here, so the colony knows this ground from now on.
+    pub fn discover(&mut self, at: IVec2) {
+        let chunk = chunk_of(at);
+        self.known.insert(key(chunk));
+        self.realise(chunk);
     }
 
     /// Everything the colony is holding, counted in cells so that the two
@@ -1175,7 +1217,7 @@ impl Patches {
     /// remembered cut is the one cell it was made in.
     #[cfg(not(feature = "window"))]
     pub fn held_cells(&self) -> usize {
-        self.chunks.len() * (CHUNK * CHUNK) as usize + self.worked.len()
+        self.chunks.len() * (CHUNK * CHUNK) as usize + self.worked.len() + self.known.len()
     }
 
     fn realise(&mut self, chunk: IVec2) {
@@ -1189,16 +1231,6 @@ impl Patches {
             }
         }
         self.chunks.insert(key(chunk), Held::new(patches));
-    }
-
-    fn realise_around(&mut self, at: IVec2, radius: i32) {
-        let low = chunk_of(at - IVec2::splat(radius));
-        let high = chunk_of(at + IVec2::splat(radius));
-        for x in low.x..=high.x {
-            for y in low.y..=high.y {
-                self.realise(IVec2::new(x, y));
-            }
-        }
     }
 
     /// What stands within a reach of here that the colony has already met.
@@ -1277,7 +1309,7 @@ impl Patches {
                 if reach > limit || best.is_some_and(|(walk, _)| reach >= walk) {
                     continue;
                 }
-                if self.standing_in(chunk, kind) == 0 {
+                if !self.has_been_to(chunk) || self.standing_in(chunk, kind) == 0 {
                     continue;
                 }
                 let Some(held) = self.chunks.get(&key(chunk)) else {
@@ -1453,6 +1485,9 @@ pub struct Citizen {
     /// What they do with their days, and what they have practised at.
     pub trade: Trade,
     pub experience: [f32; TRADE_COUNT],
+    /// Where this citizen is walking to look, if the colony has sent them out.
+    /// A scout brings back the map and nothing else.
+    pub scouting: Option<IVec2>,
     /// Years lived, on the same clock the calendar prints.
     pub age: f32,
     /// The span this one would reach if nothing got them first.
@@ -1864,6 +1899,39 @@ pub fn gather_source(
     patches
         .nearest(want.other(), from, SEARCH_LIMIT)
         .map(|pos| (pos, want.other()))
+}
+
+/// How many hands a colony of this size spares for looking. One as soon as
+/// there is a colony at all, and a share of it after that.
+pub fn scouts_wanted(hands: usize) -> usize {
+    if hands == 0 {
+        return 0;
+    }
+    ((hands as f32 * SCOUT_SHARE).round() as usize).max(1)
+}
+
+/// One leg of a scout's walk: mostly short, occasionally very long.
+///
+/// The step is drawn by inverting a tail that goes as one over the square of
+/// the distance, so the share of legs longer than some reach is the shortest
+/// leg over that reach. That exponent is the search-theory answer for sparse
+/// targets worth revisiting, and it is the mathematics that is adopted here --
+/// the animal evidence it was once argued from does not carry, since the
+/// albatross tracks behind it turned out to be a sensor artefact.
+pub fn scout_step(seed: u64, salt: u64) -> i32 {
+    let draw = noise(seed, salt).max(f32::MIN_POSITIVE);
+    ((SCOUT_STEP_MIN as f32 / draw) as i32).clamp(SCOUT_STEP_MIN, SCOUT_STEP_MAX)
+}
+
+/// Where one leg of a scout's walk ends: a heavy-tailed step in a direction
+/// drawn from the same seed, so a run replays exactly.
+pub fn scout_target(from: IVec2, seed: u64, salt: u64) -> IVec2 {
+    let step = scout_step(seed, salt) as f32;
+    let angle = noise(seed, salt.wrapping_add(SCOUT_TURN_SALT)) * std::f32::consts::TAU;
+    from + IVec2::new(
+        (angle.cos() * step).round() as i32,
+        (angle.sin() * step).round() as i32,
+    )
 }
 
 pub fn chunk_of(cell: IVec2) -> IVec2 {
@@ -2323,6 +2391,7 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
                 home,
                 carrying: None,
                 hauling: Cargo::Wood,
+                scouting: None,
             },
         ));
     }
@@ -2437,6 +2506,45 @@ pub fn regrow_patches(tick: Res<Tick>, calendar: Res<Calendar>, mut patches: Res
         return;
     }
     patches.regrow(is_growing_season(calendar.season));
+}
+
+/// Who the colony can spare for looking, and where they set off to.
+///
+/// Being idle is the whole qualification: a citizen the survival tier of the
+/// ballot has nothing to say about is one nothing has been failing, and that is
+/// exactly the citizen whose day the colony is not already spending. A tour
+/// lasts a season, because the question of who can be spared is worth asking
+/// again by then.
+pub fn send_scouts(tick: Res<Tick>, mut citizens: Query<(&Pos, &mut Citizen)>) {
+    if !tick.0.is_multiple_of(ticks_per_season()) {
+        return;
+    }
+    let hands = citizens
+        .iter()
+        .filter(|(_, citizen)| is_adult(citizen.age))
+        .count();
+    let wanted = scouts_wanted(hands);
+    let mut spare: Vec<(u32, u64)> = citizens
+        .iter()
+        .filter(|(_, citizen)| is_adult(citizen.age) && citizen.needs.nothing_failed())
+        .map(|(_, citizen)| {
+            (
+                (noise(citizen.seed, SCOUT_PICK_SALT.wrapping_add(tick.0)) * u32::MAX as f32)
+                    as u32,
+                citizen.seed,
+            )
+        })
+        .collect();
+    // Drawn rather than ordered, so that the same few are not sent every season
+    // and the colony still decides the same way in every run.
+    spare.sort_unstable();
+    spare.truncate(wanted);
+    for (pos, mut citizen) in &mut citizens {
+        citizen.scouting = spare
+            .iter()
+            .any(|(_, seed)| *seed == citizen.seed)
+            .then(|| scout_target(pos.0, citizen.seed, tick.0));
+    }
 }
 
 /// The colony keeps only the world it is standing in. Everything else goes back
@@ -2717,6 +2825,7 @@ pub fn colony_growth(
                 home,
                 carrying: None,
                 hauling: Cargo::Wood,
+                scouting: None,
             },
         ));
     }
@@ -2888,15 +2997,29 @@ pub fn citizen_ai(
         let drop_off = citizen.carrying.map_or(CENTER, |cargo| {
             delivery_target(cargo, colony.construction.diverting, site_pos)
         });
-        let target = duty_target(
-            duty,
-            air,
-            citizen.home,
-            drop_off,
-            source.map(|(cell, _)| cell),
-        );
+        // A scout is walking to look, not to fetch, so the leg stands in for the
+        // patch. Nothing brings them back but the leash: warmth's marks rise
+        // with every cell they put between themselves and the fire, and a
+        // pressing need outranks the walk.
+        let target = match citizen.scouting {
+            Some(leg) if duty == Duty::Gather => leg,
+            _ => duty_target(
+                duty,
+                air,
+                citizen.home,
+                drop_off,
+                source.map(|(cell, _)| cell),
+            ),
+        };
         if pos.0 != target {
             pos.0 = step_toward(pos.0, target);
+        }
+        // Standing somewhere is how the colony comes to know it. Haulers only
+        // ever stand on ground it already knows, so in practice this is the
+        // scout's whole yield.
+        colony.patches.discover(pos.0);
+        if citizen.scouting == Some(pos.0) {
+            citizen.scouting = Some(scout_target(pos.0, citizen.seed, tick.0));
         }
     }
 }
@@ -5834,14 +5957,15 @@ mod tests {
             seed: 0,
             chunks: BTreeMap::new(),
             worked: BTreeMap::new(),
+            known: BTreeSet::new(),
         };
         let home = chunk_of(CENTER);
         let span = SEARCH_LIMIT / CHUNK + 2;
         for x in -span..=span {
             for y in -span..=span {
-                world
-                    .chunks
-                    .insert(key(home + IVec2::new(x, y)), Held::new(Vec::new()));
+                let chunk = home + IVec2::new(x, y);
+                world.chunks.insert(key(chunk), Held::new(Vec::new()));
+                world.known.insert(key(chunk));
             }
         }
         for patch in patches {
@@ -5867,7 +5991,13 @@ mod tests {
     /// asks for the nearest patch of a kind and never for a whole radius, so
     /// this is the tests' way of naming an area.
     fn drawn(world: &mut Patches, at: IVec2, radius: i32) -> impl Iterator<Item = &Patch> {
-        world.realise_around(at, radius);
+        let low = chunk_of(at - IVec2::splat(radius));
+        let high = chunk_of(at + IVec2::splat(radius));
+        for x in low.x..=high.x {
+            for y in low.y..=high.y {
+                world.realise(IVec2::new(x, y));
+            }
+        }
         world.seen(at, radius)
     }
 
@@ -6003,20 +6133,20 @@ mod tests {
     #[test]
     fn the_bound_counts_the_cuts_the_colony_remembers_and_not_only_its_chunks() {
         let mut world = Patches::new(WORLD_SEED);
-        let chunks = world.chunks.len() * (CHUNK * CHUNK) as usize;
-        assert_eq!(
-            world.held_cells(),
-            chunks,
-            "nothing cut, nothing remembered"
-        );
         let cell = drawn(&mut world, CENTER, 64)
             .map(|patch| patch.pos)
             .next()
             .expect("the near world holds something");
+        let held = world.held_cells();
+        assert_eq!(
+            held,
+            world.chunks.len() * (CHUNK * CHUNK) as usize + world.known.len(),
+            "the chunks it holds and the ground it knows, nothing cut yet"
+        );
         world.take(cell, 1);
         assert_eq!(
             world.held_cells(),
-            chunks + 1,
+            held + 1,
             "a remembered cut is held whether or not its chunk still is"
         );
         assert!(
@@ -6313,6 +6443,122 @@ mod tests {
             world.standing_in(home, Cargo::Wood),
             summed(&world, Cargo::Wood),
             "and so does growing back"
+        );
+    }
+
+    #[test]
+    fn a_scouts_step_is_mostly_short_and_sometimes_very_long() {
+        let draws: Vec<i32> = (0..20_000).map(|i| scout_step(WORLD_SEED, i)).collect();
+        let over =
+            |x: i32| draws.iter().filter(|step| **step > x).count() as f32 / draws.len() as f32;
+        // For a tail going as one over the square, the share past x is the
+        // shortest step over x. Two steps out is a half, ten is a tenth.
+        assert!(
+            (over(SCOUT_STEP_MIN * 2) - 0.5).abs() < 0.03,
+            "half the steps should pass twice the shortest, got {}",
+            over(SCOUT_STEP_MIN * 2)
+        );
+        assert!(
+            (over(SCOUT_STEP_MIN * 10) - 0.1).abs() < 0.02,
+            "a tenth should pass ten times it, got {}",
+            over(SCOUT_STEP_MIN * 10)
+        );
+        assert!(
+            draws
+                .iter()
+                .all(|step| *step >= SCOUT_STEP_MIN && *step <= SCOUT_STEP_MAX),
+            "every step has to be inside its own bounds"
+        );
+        assert!(
+            draws.iter().any(|step| *step > SCOUT_STEP_MIN * 20),
+            "and the tail has to be heavy enough to actually reach"
+        );
+    }
+
+    #[test]
+    fn a_scout_walks_the_same_way_in_every_run() {
+        let from = CENTER;
+        for salt in 0..50 {
+            assert_eq!(
+                scout_target(from, WORLD_SEED, salt),
+                scout_target(from, WORLD_SEED, salt),
+                "a walk drawn from the seed has to repeat"
+            );
+        }
+        let spread: Vec<IVec2> = (0..200)
+            .map(|salt| scout_target(from, WORLD_SEED, salt))
+            .collect();
+        assert!(
+            spread.iter().any(|to| to.x > from.x) && spread.iter().any(|to| to.x < from.x),
+            "and it has to go both ways"
+        );
+        assert!(
+            spread.iter().any(|to| to.y > from.y) && spread.iter().any(|to| to.y < from.y),
+            "on both axes"
+        );
+    }
+
+    #[test]
+    fn a_founding_colony_knows_the_ground_it_lives_off_and_no_more() {
+        let world = Patches::new(WORLD_SEED);
+        for x in [-NEAR_GROUND, 0, NEAR_GROUND] {
+            for y in [-NEAR_GROUND, 0, NEAR_GROUND] {
+                let cell = CENTER + IVec2::new(x, y);
+                assert!(
+                    world.has_been_to(chunk_of(cell)),
+                    "the colony must know the ground it works at {cell:?}"
+                );
+            }
+        }
+        assert!(
+            !world.has_been_to(chunk_of(CENTER) + IVec2::new(2, 0)),
+            "and must not know ground nobody has walked to"
+        );
+    }
+
+    #[test]
+    fn the_colony_only_works_ground_it_has_been_to() {
+        let mut world = Patches::new(WORLD_SEED);
+        let far = chunk_of(CENTER) + IVec2::new(2, 0);
+        let inside = far * CHUNK + IVec2::splat(CHUNK / 2);
+        assert!(!world.has_been_to(far));
+        assert_eq!(
+            world.nearest(Cargo::Wood, inside, CHUNK),
+            None,
+            "unknown ground holds nothing the colony can work"
+        );
+        world.discover(inside);
+        assert!(world.has_been_to(far));
+        assert!(
+            world.nearest(Cargo::Wood, inside, CHUNK).is_some(),
+            "and once somebody has stood there, it does"
+        );
+    }
+
+    #[test]
+    fn the_colony_never_forgets_where_it_has_been() {
+        let mut world = Patches::new(WORLD_SEED);
+        let far = chunk_of(CENTER) + IVec2::new(3, 1);
+        let inside = far * CHUNK + IVec2::splat(CHUNK / 2);
+        world.discover(inside);
+        world.forget_beyond(&[], 0);
+        assert!(
+            world.has_been_to(far),
+            "dropping a chunk from memory must not unlearn it"
+        );
+    }
+
+    #[test]
+    fn a_colony_spares_hands_for_looking_only_once_it_has_them() {
+        assert_eq!(scouts_wanted(0), 0);
+        assert_eq!(scouts_wanted(CITIZENS), 1, "a founding party spares one");
+        assert!(
+            scouts_wanted(CITIZENS * 4) > scouts_wanted(CITIZENS),
+            "and a bigger colony spares more"
+        );
+        assert!(
+            scouts_wanted(1000) <= 1000 / 10,
+            "but never enough to stop being a colony that works"
         );
     }
 }
