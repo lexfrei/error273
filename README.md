@@ -78,7 +78,7 @@ rustup toolchain install stable
 cargo run
 ```
 
-That opens a window and draws the map on square cells, twelve and a half ticks a second, with the four status lines under it. Every cell is tinted by how warm it is, so the fire's reach is a thing you can watch shrink through autumn. It exits on its own once everyone is dead; Ctrl+C ends it early.
+That opens a window and draws the map on square cells, twelve and a half ticks a second, with the status lines under it. Every cell is tinted by how warm it is, so the fire's reach is a thing you can watch shrink through autumn. It exits on its own once everyone is dead; Ctrl+C ends it early.
 
 ### The headless instrument
 
@@ -144,7 +144,7 @@ Sleeping under a roof cuts the bleed of body heat by 30%. It is shelter, not a s
 
 ### Hauling
 
-Eight treelines of 50 units and four hunting grounds of 60 stand on the rim, 640 in total, and nothing regrows.
+Eight treelines of 80 units and four hunting grounds of 90 stand on the rim, a thousand in all when they are full. They are not a fixed store: they grow back towards those caps in every season but winter, which is what makes the year rather than the map decide how long a colony lasts.
 
 A citizen picks which of the two to fetch by comparing each store against what the colony wants to hold per head, and keeps to that choice for the whole trip. They only change their mind when the other store has fallen a clear margin behind, because a round trip takes thirty-odd hours and a workforce that turns around every time a number crosses its target arrives too late in both directions. That margin is counted in hauls rather than units, so it widens as huts make each trip of game worth more: the slack a store gets is always about the same number of trips. The comparison is also made against what each store will hold once everyone already fetching that kind gets home, not against what is in it now, so a shortage pulls over as many haulers as it needs and no more.
 
