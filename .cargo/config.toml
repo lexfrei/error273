@@ -1,3 +1,0 @@
-# Build cache on the external SSD; builds fail if MyDrive is not mounted.
-[build]
-target-dir = "/Volumes/MyDrive/cache/cargo-target/error273"
