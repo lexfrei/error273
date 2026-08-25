@@ -185,7 +185,7 @@ fn paint_map(
     }
     mark_at(&mut grid, CENTER, GENERATOR);
 
-    let air = *air;
+    let air = &*air;
     for (cell, mut sprite) in &mut tiles {
         let ground = ground_of(cell.0, air);
         if sprite.color != ground {
@@ -286,7 +286,7 @@ fn world_of(p: IVec2) -> Vec2 {
 
 /// Warmth as a background. Every cell in the frame gets the heat map now: there
 /// is no outside to leave flat, only ground the frame does not reach.
-fn ground_of(p: IVec2, air: Air) -> Color {
+fn ground_of(p: IVec2, air: &Air) -> Color {
     let warmth = ((air.heat_at(p) - air.ambient) / GENERATOR_HEAT).clamp(0.0, 1.0);
     if warmth < 0.5 {
         FROST.mix(&EMBER, warmth * 2.0).into()

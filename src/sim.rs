@@ -1678,10 +1678,6 @@ pub fn regrowth_step(amount: u32, cap: u32, kind: Cargo, growing: bool) -> u32 {
     (amount + regrowth_per_day(kind)).min(cap)
 }
 
-pub fn fire_reach(air: Air) -> f32 {
-    air.reach()
-}
-
 /// Ticks a citizen would spend in the cold walking home from here.
 ///
 /// The two shapes involved do not line up, and that is the whole of the
@@ -1691,9 +1687,20 @@ pub fn fire_reach(air: Air) -> f32 {
 /// one a tick until the shorter runs out, so the citizen crosses into the ring
 /// either on the diagonal stretch or on the straight one that follows it. Whole
 /// ticks, rounded up, because a citizen cannot spend part of one in the cold.
-pub fn cost_of_getting_home(at: IVec2, air: Air) -> f32 {
-    let reach = fire_reach(air);
-    let away = (at - CENTER).abs();
+pub fn cost_of_getting_home(at: IVec2, air: &Air) -> f32 {
+    air.fires
+        .iter()
+        .map(|fire| cold_walk(at, fire.at, fire.reach(air.ambient)))
+        .fold(f32::INFINITY, f32::min)
+        // With nothing lit anywhere there is no walk that ends in warmth, and
+        // the mark this feeds is above the ceiling for as long as that is true,
+        // which is the honest reading of a colony whose fire has gone out.
+        .min(cold_walk(at, CENTER, 0.0))
+}
+
+/// Ticks in the cold walking from one cell to a fire with this reach.
+fn cold_walk(at: IVec2, to: IVec2, reach: f32) -> f32 {
+    let away = (at - to).abs();
     let far = away.max_element() as f32;
     let near = away.min_element() as f32;
     if far * far + near * near <= reach * reach {
@@ -1728,34 +1735,58 @@ pub fn generator_output(fuel: u32, upgrades: usize) -> f32 {
     (fuel as f32 / FULL_BURN_FUEL as f32).min(1.0) * ceiling
 }
 
-/// The air the colony is standing in: what the fire is putting out, and how
-/// cold it is outside the fire's reach. The two always travel together.
-#[derive(Resource, Debug, Clone, Copy, Default)]
-pub struct Air {
+/// A place the colony keeps warm. The hearth is one, and the only one today.
+#[derive(Debug, Clone, Copy)]
+pub struct Fire {
+    pub at: IVec2,
     pub output: f32,
+}
+
+impl Fire {
+    pub fn heat_at(self, p: IVec2, ambient: f32) -> f32 {
+        let away = p.as_vec2().distance(self.at.as_vec2());
+        (self.output - away * HEAT_FALLOFF).max(0.0) + ambient
+    }
+
+    /// How far out this fire's heat still clears the air: the last ring of
+    /// cells at which a citizen standing by it stops losing warmth.
+    pub fn reach(self, ambient: f32) -> f32 {
+        ((self.output + ambient) / HEAT_FALLOFF).max(0.0)
+    }
+}
+
+/// The air the colony is standing in: every fire it is keeping, and how cold it
+/// is outside all of them. The two always travel together.
+///
+/// A single fire is a closed form evaluable at any coordinate in any order,
+/// which is what an unbounded world can afford; a second one costs a walk over
+/// the list. That is the price of a fire that is not the hearth, and it is why
+/// the list is meant to stay short.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct Air {
+    pub fires: Vec<Fire>,
     pub ambient: f32,
 }
 
 impl Air {
-    pub fn heat_at(self, p: IVec2) -> f32 {
-        let d = p.as_vec2().distance(CENTER.as_vec2());
-        (self.output - d * HEAT_FALLOFF).max(0.0) + self.ambient
+    /// The warmest any of the colony's fires makes this square. Warmth does not
+    /// add up: standing between two fires is as good as standing by the better
+    /// of them and no better.
+    pub fn heat_at(&self, p: IVec2) -> f32 {
+        self.fires
+            .iter()
+            .map(|fire| fire.heat_at(p, self.ambient))
+            .fold(self.ambient, f32::max)
     }
 
-    /// How far out the fire's heat still clears the air: the last ring of cells
-    /// at which a citizen stops losing warmth.
-    pub fn reach(self) -> f32 {
-        ((self.output + self.ambient) / HEAT_FALLOFF).max(0.0)
-    }
-
-    /// The nearest warmth worth walking to: the generator while it still heats
-    /// the square, otherwise the citizen's own roof.
-    pub fn warmth_target(self, home: IVec2) -> IVec2 {
-        if self.heat_at(CENTER) > 0.0 {
-            CENTER
-        } else {
-            home
-        }
+    /// The nearest warmth worth walking to: whichever fire still heats its own
+    /// square and is fewest steps away, and the citizen's own roof if none does.
+    pub fn warmth_target(&self, home: IVec2, from: IVec2) -> IVec2 {
+        self.fires
+            .iter()
+            .filter(|fire| fire.heat_at(fire.at, self.ambient) > 0.0)
+            .min_by_key(|fire| (fire.at - from).abs().max_element())
+            .map_or(home, |fire| fire.at)
     }
 }
 
@@ -1794,18 +1825,19 @@ pub fn choose_duty(
 /// any is left, and `drop_off` is wherever their load is wanted.
 pub fn duty_target(
     duty: Duty,
-    air: Air,
+    air: &Air,
+    at: IVec2,
     home: IVec2,
     drop_off: IVec2,
     source: Option<IVec2>,
 ) -> IVec2 {
     match duty {
-        Duty::WarmUp => air.warmth_target(home),
+        Duty::WarmUp => air.warmth_target(home, at),
         Duty::Eat => CENTER,
         Duty::Deliver => drop_off,
         Duty::Rest => home,
         // With the patches stripped there is no work left, only warmth to find.
-        Duty::Gather => source.unwrap_or_else(|| air.warmth_target(home)),
+        Duty::Gather => source.unwrap_or_else(|| air.warmth_target(home, at)),
     }
 }
 
@@ -2495,7 +2527,10 @@ pub fn advance_weather(
     mut air: ResMut<Air>,
 ) {
     *air = Air {
-        output: generator_output(generator.fuel, built.of(Building::GeneratorUpgrade)),
+        fires: vec![Fire {
+            at: CENTER,
+            output: generator_output(generator.fuel, built.of(Building::GeneratorUpgrade)),
+        }],
         ambient: ambient_at(tick.0),
     };
 }
@@ -2840,7 +2875,7 @@ pub fn citizen_ai(
     mut colony: Colony,
     mut citizens: Query<(Entity, &mut Pos, &mut Citizen)>,
 ) {
-    let air = *air;
+    let air = &*air;
     let site_pos = colony.construction.site.as_ref().map(|site| site.pos);
     let population = citizens.iter().count();
     // Who is already committed to fetching what, kept up to date as citizens
@@ -3006,6 +3041,7 @@ pub fn citizen_ai(
             _ => duty_target(
                 duty,
                 air,
+                pos.0,
                 citizen.home,
                 drop_off,
                 source.map(|(cell, _)| cell),
@@ -3041,7 +3077,10 @@ mod tests {
     /// The air with the fire at a given stock, on a day of average cold.
     fn air(fuel: u32, upgrades: usize) -> Air {
         Air {
-            output: generator_output(fuel, upgrades),
+            fires: vec![Fire {
+                at: CENTER,
+                output: generator_output(fuel, upgrades),
+            }],
             ambient: AMBIENT_MEAN,
         }
     }
@@ -3126,8 +3165,8 @@ mod tests {
     #[test]
     fn citizens_fall_back_to_their_own_roof_when_the_square_goes_cold() {
         let home = IVec2::new(3, 4);
-        assert_eq!(air(FULL_BURN_FUEL, 0).warmth_target(home), CENTER);
-        assert_eq!(air(0, 0).warmth_target(home), home);
+        assert_eq!(air(FULL_BURN_FUEL, 0).warmth_target(home, CENTER), CENTER);
+        assert_eq!(air(0, 0).warmth_target(home, CENTER), home);
     }
 
     #[test]
@@ -3432,23 +3471,23 @@ mod tests {
         let patch = IVec2::new(1, 1);
         let lit = air(FULL_BURN_FUEL, 0);
         assert_eq!(
-            duty_target(Duty::WarmUp, lit, home, drop_off, Some(patch)),
+            duty_target(Duty::WarmUp, &lit, CENTER, home, drop_off, Some(patch)),
             CENTER
         );
         assert_eq!(
-            duty_target(Duty::Eat, lit, home, drop_off, Some(patch)),
+            duty_target(Duty::Eat, &lit, CENTER, home, drop_off, Some(patch)),
             CENTER
         );
         assert_eq!(
-            duty_target(Duty::Deliver, lit, home, drop_off, Some(patch)),
+            duty_target(Duty::Deliver, &lit, CENTER, home, drop_off, Some(patch)),
             drop_off
         );
         assert_eq!(
-            duty_target(Duty::Rest, lit, home, drop_off, Some(patch)),
+            duty_target(Duty::Rest, &lit, CENTER, home, drop_off, Some(patch)),
             home
         );
         assert_eq!(
-            duty_target(Duty::Gather, lit, home, drop_off, Some(patch)),
+            duty_target(Duty::Gather, &lit, CENTER, home, drop_off, Some(patch)),
             patch
         );
     }
@@ -3458,12 +3497,19 @@ mod tests {
         let home = IVec2::new(3, 4);
         let drop_off = IVec2::new(7, 8);
         assert_eq!(
-            duty_target(Duty::Gather, air(FULL_BURN_FUEL, 0), home, drop_off, None),
+            duty_target(
+                Duty::Gather,
+                &air(FULL_BURN_FUEL, 0),
+                CENTER,
+                home,
+                drop_off,
+                None
+            ),
             CENTER,
             "while the fire burns, idle citizens huddle around it"
         );
         assert_eq!(
-            duty_target(Duty::Gather, air(0, 0), home, drop_off, None),
+            duty_target(Duty::Gather, &air(0, 0), CENTER, home, drop_off, None),
             home,
             "once it is out, the only shelter left is their own roof"
         );
@@ -3953,14 +3999,14 @@ mod tests {
     fn a_boiler_burns_hotter_and_reaches_further() {
         let plain = air(FULL_BURN_FUEL, 0);
         let upgraded = air(FULL_BURN_FUEL, 1);
-        assert!(upgraded.output > plain.output);
-        let reach = |lit: Air| {
+        assert!(upgraded.fires[0].output > plain.fires[0].output);
+        let reach = |lit: &Air| {
             (0..=R)
                 .filter(|d| lit.heat_at(CENTER + IVec2::new(*d, 0)) > 0.0)
                 .count()
         };
         assert!(
-            reach(upgraded) > reach(plain),
+            reach(&upgraded) > reach(&plain),
             "a hotter fire warms more ground"
         );
         assert_eq!(
@@ -4565,10 +4611,10 @@ mod tests {
     #[test]
     fn winter_pulls_the_freezing_line_inside_the_treeline() {
         let year = SEVERITY_FULL_YEAR;
-        let midwinter = Air {
-            output: generator_output(FULL_BURN_FUEL, 0),
-            ambient: ambient_at(day_of(year, DAYS_PER_SEASON * 3 + DAYS_PER_SEASON / 2)),
-        };
+        let midwinter = one_fire(
+            generator_output(FULL_BURN_FUEL, 0),
+            ambient_at(day_of(year, DAYS_PER_SEASON * 3 + DAYS_PER_SEASON / 2)),
+        );
         assert!(
             midwinter.heat_at(CENTER + IVec2::new(PATCH_RADIUS, 0)) < 0.0,
             "a hauler at the treeline must feel it in deep winter"
@@ -4584,10 +4630,7 @@ mod tests {
         let year = SEVERITY_FULL_YEAR;
         let ambient = ambient_at(day_of(year, DAYS_PER_SEASON * 3 + DAYS_PER_SEASON / 2));
         let reach = |upgrades| {
-            let air = Air {
-                output: generator_output(FULL_BURN_FUEL, upgrades),
-                ambient,
-            };
+            let air = one_fire(generator_output(FULL_BURN_FUEL, upgrades), ambient);
             (0..=R)
                 .filter(|d| air.heat_at(CENTER + IVec2::new(*d, 0)) > 0.0)
                 .count()
@@ -6232,15 +6275,12 @@ mod tests {
     }
 
     fn mean_day() -> Air {
-        Air {
-            output: GENERATOR_HEAT,
-            ambient: AMBIENT_MEAN,
-        }
+        one_fire(GENERATOR_HEAT, AMBIENT_MEAN)
     }
 
     /// The walk home counted the way a citizen actually takes it: one king move
     /// a tick, losing warmth wherever the fire does not reach.
-    fn walked_home(at: IVec2, air: Air) -> f32 {
+    fn walked_home(at: IVec2, air: &Air) -> f32 {
         let mut pos = at;
         let mut cold = 0.0;
         while pos != CENTER {
@@ -6256,17 +6296,14 @@ mod tests {
     fn the_walk_home_is_counted_the_way_a_citizen_walks_it() {
         for air in [
             mean_day(),
-            Air {
-                output: GENERATOR_HEAT,
-                ambient: AMBIENT_MEAN - AMBIENT_SWING,
-            },
+            one_fire(GENERATOR_HEAT, AMBIENT_MEAN - AMBIENT_SWING),
         ] {
             for x in -70..=70 {
                 for y in -70..=70 {
                     let at = CENTER + IVec2::new(x, y);
                     assert_eq!(
-                        cost_of_getting_home(at, air),
-                        walked_home(at, air),
+                        cost_of_getting_home(at, &air),
+                        walked_home(at, &air),
                         "the closed form disagrees with the walk at {x},{y}"
                     );
                 }
@@ -6277,16 +6314,20 @@ mod tests {
     #[test]
     fn a_citizen_inside_the_warm_ring_has_no_walk_to_pay_for() {
         let air = mean_day();
-        assert_eq!(cost_of_getting_home(CENTER, air), 0.0);
-        let rim = CENTER + IVec2::new(fire_reach(air) as i32, 0);
-        assert_eq!(cost_of_getting_home(rim, air), 0.0, "the rim is still warm");
+        assert_eq!(cost_of_getting_home(CENTER, &air), 0.0);
+        let rim = CENTER + IVec2::new(air.fires[0].reach(air.ambient) as i32, 0);
+        assert_eq!(
+            cost_of_getting_home(rim, &air),
+            0.0,
+            "the rim is still warm"
+        );
     }
 
     #[test]
     fn the_old_mark_kills_a_citizen_fifty_ticks_from_the_fire() {
         let air = mean_day();
         let out = CENTER + IVec2::new(63, 0);
-        let cost = cost_of_getting_home(out, air);
+        let cost = cost_of_getting_home(out, &air);
         assert_eq!(cost, 50.0, "fifty ticks of cold between here and the fire");
 
         let fixed = NeedKind::Warmth.rules().low;
@@ -6559,6 +6600,119 @@ mod tests {
         assert!(
             scouts_wanted(1000) <= 1000 / 10,
             "but never enough to stop being a colony that works"
+        );
+    }
+
+    /// A second fire's output, for the tests that need one before anything in
+    /// the colony can build one.
+    const OUTPOST_HEAT: f32 = 40.0;
+
+    fn one_fire(output: f32, ambient: f32) -> Air {
+        Air {
+            fires: vec![Fire { at: CENTER, output }],
+            ambient,
+        }
+    }
+
+    #[test]
+    fn a_second_fire_warms_its_own_square_and_nothing_takes_that_away() {
+        let ambient = AMBIENT_MEAN;
+        let outpost = CENTER + IVec2::new(90, 0);
+        let alone = one_fire(GENERATOR_HEAT, ambient);
+        assert!(alone.heat_at(outpost) < 0.0, "nobody is warm out there yet");
+
+        let mut lit = alone.clone();
+        lit.fires.push(Fire {
+            at: outpost,
+            output: OUTPOST_HEAT,
+        });
+        assert!(lit.heat_at(outpost) > 0.0, "and now somebody is");
+        assert_eq!(
+            lit.heat_at(CENTER),
+            alone.heat_at(CENTER),
+            "a fire out there must not change the hearth"
+        );
+        for x in -30..=30 {
+            let cell = CENTER + IVec2::new(x, 0);
+            assert!(
+                lit.heat_at(cell) >= alone.heat_at(cell),
+                "a second fire can only ever add warmth"
+            );
+        }
+    }
+
+    #[test]
+    fn air_with_nothing_lit_is_just_the_weather() {
+        let air = Air {
+            fires: Vec::new(),
+            ambient: AMBIENT_MEAN,
+        };
+        assert_eq!(air.heat_at(CENTER), AMBIENT_MEAN);
+        assert_eq!(air.heat_at(CENTER + IVec2::new(200, 200)), AMBIENT_MEAN);
+    }
+
+    #[test]
+    fn the_walk_home_is_to_the_nearest_warmth_and_not_to_the_hearth() {
+        let ambient = AMBIENT_MEAN;
+        let outpost = CENTER + IVec2::new(90, 0);
+        let alone = one_fire(GENERATOR_HEAT, ambient);
+        let far = cost_of_getting_home(outpost, &alone);
+        assert!(
+            far > 70.0,
+            "without a fire out there the walk is the whole way"
+        );
+
+        let mut lit = alone.clone();
+        lit.fires.push(Fire {
+            at: outpost,
+            output: OUTPOST_HEAT,
+        });
+        assert_eq!(
+            cost_of_getting_home(outpost, &lit),
+            0.0,
+            "standing at a lit waystation costs nothing to get warm at"
+        );
+        assert_eq!(
+            cost_of_getting_home(CENTER, &lit),
+            cost_of_getting_home(CENTER, &alone),
+            "and the hearth is unaffected by what stands ninety cells away"
+        );
+    }
+
+    #[test]
+    fn a_citizen_walks_to_whichever_fire_is_nearer() {
+        let ambient = AMBIENT_MEAN;
+        let outpost = CENTER + IVec2::new(90, 0);
+        let mut lit = one_fire(GENERATOR_HEAT, ambient);
+        lit.fires.push(Fire {
+            at: outpost,
+            output: OUTPOST_HEAT,
+        });
+        let home = CENTER + IVec2::new(3, 3);
+        assert_eq!(lit.warmth_target(home, outpost + IVec2::new(4, 0)), outpost);
+        assert_eq!(lit.warmth_target(home, CENTER + IVec2::new(4, 0)), CENTER);
+    }
+
+    #[test]
+    fn a_dead_fire_is_not_walked_to() {
+        let ambient = AMBIENT_MEAN;
+        let outpost = CENTER + IVec2::new(90, 0);
+        let mut cold = one_fire(GENERATOR_HEAT, ambient);
+        cold.fires.push(Fire {
+            at: outpost,
+            output: 0.0,
+        });
+        let home = outpost + IVec2::new(2, 2);
+        assert_eq!(
+            cold.warmth_target(home, outpost),
+            CENTER,
+            "an unlit waystation is a place to stand, not a place to warm up, so the walk is the long one"
+        );
+        cold.fires[0].output = 0.0;
+        assert_eq!(
+            cold.warmth_target(home, outpost),
+            home,
+            "and with nothing lit anywhere there is only a roof to go to"
         );
     }
 }
