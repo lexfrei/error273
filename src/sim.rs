@@ -134,6 +134,9 @@ pub const GROWTH_SHARE: f32 = 0.6;
 // judges to be the shorter one.
 pub const FUEL_PER_CITIZEN: f32 = 1.3;
 pub const FOOD_PER_CITIZEN: f32 = 0.6;
+// Deadband on the haul decision: how far behind the other store has to fall,
+// in shares of its target, before a hauler changes what they are fetching.
+pub const HAUL_SWITCH_MARGIN: f32 = 0.25;
 // Every block of citizens the generator has to warm costs another log per cycle,
 // so growth is paid for twice: once in timber, then forever in fuel.
 pub const POP_PER_EXTRA_BURN: usize = 20;
@@ -281,6 +284,15 @@ pub enum Cargo {
     Food,
 }
 
+impl Cargo {
+    pub fn other(self) -> Cargo {
+        match self {
+            Cargo::Wood => Cargo::Food,
+            Cargo::Food => Cargo::Wood,
+        }
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct Generator {
     pub fuel: u32,
@@ -417,14 +429,26 @@ pub fn duty_target(
     }
 }
 
-/// Which stockpile the colony is shorter on, measured against what it wants to
-/// hold per citizen. Ties go to wood: the cold kills faster than hunger.
-pub fn haul_choice(fuel: u32, food: u32, population: usize) -> Cargo {
-    let share = |stock: u32, per_head: f32| stock as f32 / (population as f32 * per_head).max(1.0);
-    if share(food, FOOD_PER_CITIZEN) < share(fuel, FUEL_PER_CITIZEN) {
-        Cargo::Food
+/// How well stocked a store is against what the colony wants to hold per head.
+/// One is the target; below one it is running short.
+pub fn stock_share(stock: u32, per_head: f32, population: usize) -> f32 {
+    stock as f32 / (population as f32 * per_head).max(1.0)
+}
+
+/// Which store a hauler works next. They keep to the kind they were on until
+/// the other store has fallen a clear margin behind, so a stockpile crossing
+/// its target does not swing the whole workforce round at once.
+pub fn haul_choice(current: Cargo, fuel: u32, food: u32, population: usize) -> Cargo {
+    let wood = stock_share(fuel, FUEL_PER_CITIZEN, population);
+    let game = stock_share(food, FOOD_PER_CITIZEN, population);
+    let (working, other) = match current {
+        Cargo::Wood => (wood, game),
+        Cargo::Food => (game, wood),
+    };
+    if other + HAUL_SWITCH_MARGIN < working {
+        current.other()
     } else {
-        Cargo::Wood
+        current
     }
 }
 
@@ -439,11 +463,7 @@ pub fn gather_source(patches: &Patches, want: Cargo, from: IVec2) -> Option<(IVe
             .min_by_key(|patch| (patch.pos - from).abs().max_element())
             .map(|patch| (patch.pos, patch.kind))
     };
-    let other = match want {
-        Cargo::Wood => Cargo::Food,
-        Cargo::Food => Cargo::Wood,
-    };
-    nearest(want).or_else(|| nearest(other))
+    nearest(want).or_else(|| nearest(want.other()))
 }
 
 pub fn take_from_patch(patches: &mut Patches, pos: IVec2) {
@@ -659,7 +679,7 @@ pub fn colony_growth(
             needs: Needs::newcomer(),
             home,
             carrying: None,
-            hauling: haul_choice(generator.fuel, granary.food, people.len()),
+            hauling: haul_choice(Cargo::Wood, generator.fuel, granary.food, people.len()),
         },
     ));
 }
@@ -720,7 +740,8 @@ pub fn citizen_ai(
                     (Cargo::Food, _) => granary.food += 1,
                 }
                 citizen.carrying = None;
-                citizen.hauling = haul_choice(generator.fuel, granary.food, population);
+                citizen.hauling =
+                    haul_choice(citizen.hauling, generator.fuel, granary.food, population);
             }
         }
 
@@ -1093,27 +1114,58 @@ mod tests {
         );
     }
 
-    #[test]
-    fn haulers_follow_whichever_stockpile_is_shorter() {
-        assert_eq!(haul_choice(200, 1, 30), Cargo::Food);
-        assert_eq!(haul_choice(1, 200, 30), Cargo::Wood);
+    /// Stock levels that put the two stores exactly `gap` shares apart, with
+    /// wood ahead when `gap` is positive.
+    fn stores_apart(population: usize, gap: f32) -> (u32, u32) {
+        let fuel = population as f32 * FUEL_PER_CITIZEN;
+        let food = population as f32 * FOOD_PER_CITIZEN * (1.0 - gap);
+        (fuel.round() as u32, food.round() as u32)
     }
 
     #[test]
-    fn an_equally_stocked_colony_hauls_wood() {
+    fn haulers_turn_to_whichever_store_has_fallen_clearly_behind() {
+        assert_eq!(haul_choice(Cargo::Wood, 200, 1, 30), Cargo::Food);
+        assert_eq!(haul_choice(Cargo::Food, 1, 200, 30), Cargo::Wood);
+    }
+
+    #[test]
+    fn a_hauler_holds_its_kind_until_the_other_store_clears_the_band() {
         let pop = 30;
-        let fuel = (pop as f32 * FUEL_PER_CITIZEN) as u32;
-        let food = (pop as f32 * FOOD_PER_CITIZEN) as u32;
+        let (fuel, food) = stores_apart(pop, HAUL_SWITCH_MARGIN / 2.0);
         assert_eq!(
-            haul_choice(fuel, food, pop),
+            haul_choice(Cargo::Wood, fuel, food, pop),
             Cargo::Wood,
-            "ties go to the fire, which kills faster than hunger"
+            "inside the band the workforce does not turn around"
+        );
+        let (fuel, food) = stores_apart(pop, HAUL_SWITCH_MARGIN * 2.0);
+        assert_eq!(
+            haul_choice(Cargo::Wood, fuel, food, pop),
+            Cargo::Food,
+            "past the band it does"
         );
     }
 
     #[test]
+    fn the_band_works_the_same_way_round() {
+        let pop = 30;
+        let (fuel, food) = stores_apart(pop, -HAUL_SWITCH_MARGIN / 2.0);
+        assert_eq!(haul_choice(Cargo::Food, fuel, food, pop), Cargo::Food);
+        let (fuel, food) = stores_apart(pop, -HAUL_SWITCH_MARGIN * 2.0);
+        assert_eq!(haul_choice(Cargo::Food, fuel, food, pop), Cargo::Wood);
+    }
+
+    #[test]
+    fn evenly_stocked_stores_leave_every_hauler_where_they_are() {
+        let pop = 30;
+        let (fuel, food) = stores_apart(pop, 0.0);
+        assert_eq!(haul_choice(Cargo::Wood, fuel, food, pop), Cargo::Wood);
+        assert_eq!(haul_choice(Cargo::Food, fuel, food, pop), Cargo::Food);
+    }
+
+    #[test]
     fn haul_choice_survives_an_empty_colony() {
-        assert_eq!(haul_choice(0, 0, 0), Cargo::Wood);
+        assert_eq!(haul_choice(Cargo::Wood, 0, 0, 0), Cargo::Wood);
+        assert_eq!(haul_choice(Cargo::Food, 0, 0, 0), Cargo::Food);
     }
 
     #[test]
