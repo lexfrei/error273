@@ -98,7 +98,7 @@ pub const FULL_BURN_FUEL: u32 = 20;
 pub const BURN_EVERY: u64 = 4 * TICKS_PER_HOUR;
 pub const CITIZENS: usize = 30;
 
-// Harvest patches sit on the rim, out past the last buildable house ring.
+// Harvest patches sit on the rim, out past the last buildable ring of plots.
 pub const PATCH_RADIUS: i32 = R - 1;
 pub const WOOD_CELLS: usize = 8;
 pub const WOOD_PER_CELL: u32 = 50;
@@ -115,11 +115,11 @@ pub const SHELTER_DRAIN_FACTOR: f32 = 0.7;
 pub const FOOD_PER_MEAL: u32 = 1;
 
 pub const HOUSE_CAPACITY: usize = 3;
-pub const HOUSES_PER_RING: usize = 12;
-pub const HOUSE_RING_START: i32 = 5;
-pub const HOUSE_RING_STEP: i32 = 2;
-// Keep a margin between the outermost house ring and the patches on the rim.
-pub const HOUSE_MAX_RADIUS: i32 = R - 3;
+pub const PLOTS_PER_RING: usize = 12;
+pub const PLOT_RING_START: i32 = 5;
+pub const PLOT_RING_STEP: i32 = 2;
+// Keep a margin between the outermost ring of plots and the patches on the rim.
+pub const PLOT_MAX_RADIUS: i32 = R - 3;
 pub const HOUSE_WOOD_COST: u32 = 12;
 pub const HUT_WOOD_COST: u32 = 16;
 pub const BOILER_WOOD_COST: u32 = 24;
@@ -190,6 +190,8 @@ impl NeedKind {
                 recovery: per_hour(4.0),
                 low: 40.0,
                 high: 90.0,
+                // Rest counts as met so long as a citizen is not actually spent:
+                // working through the band is the normal state, not a shortage.
                 comfort: 41.0,
                 fatal: false,
             },
@@ -206,7 +208,8 @@ impl NeedKind {
 }
 
 /// One need's state. `level` runs from 0 (desperate) to `NEED_MAX` (satisfied)
-/// for every kind, so needs of different kinds compare directly.
+/// for every kind, but each kind lives in a different part of that range, so
+/// two levels are only comparable through `Needs::shortfall`.
 #[derive(Debug, Clone, Copy)]
 pub struct Need {
     pub level: f32,
@@ -345,7 +348,7 @@ pub struct Patch {
 #[derive(Resource)]
 pub struct Patches(pub Vec<Patch>);
 
-/// The colony builds one house at a time; wood carried here is wood not burned.
+/// The colony runs one project at a time; wood carried there is wood not burned.
 #[derive(Resource, Default)]
 pub struct Construction {
     pub site: Option<Site>,
@@ -419,7 +422,6 @@ pub struct Mayor {
 #[derive(Resource, Default)]
 pub struct Ballot {
     pub tally: [f32; BUILDING_COUNT],
-    pub decided: Option<Building>,
 }
 
 /// A finished building standing on a plot.
@@ -597,18 +599,18 @@ pub fn patch_sites() -> Vec<Patch> {
     patches
 }
 
-/// Fixed site for the n-th house, filling one ring before moving outward so
-/// that adding a house never displaces the ones already standing.
+/// Fixed plot for the n-th building, filling one ring before moving outward so
+/// that putting something up never displaces what already stands.
 pub fn plot_site(index: usize) -> Option<IVec2> {
-    let ring = index / HOUSES_PER_RING;
-    let radius = HOUSE_RING_START + ring as i32 * HOUSE_RING_STEP;
-    if radius > HOUSE_MAX_RADIUS {
+    let ring = index / PLOTS_PER_RING;
+    let radius = PLOT_RING_START + ring as i32 * PLOT_RING_STEP;
+    if radius > PLOT_MAX_RADIUS {
         return None;
     }
-    let slot = index % HOUSES_PER_RING;
+    let slot = index % PLOTS_PER_RING;
     // Offset every other ring by half a slot so streets are not fully radial.
     let offset = if ring.is_multiple_of(2) { 0.0 } else { 0.5 };
-    let angle = (slot as f32 + offset) / HOUSES_PER_RING as f32 * std::f32::consts::TAU;
+    let angle = (slot as f32 + offset) / PLOTS_PER_RING as f32 * std::f32::consts::TAU;
     Some(ring_pos(radius as f32, angle))
 }
 
@@ -708,6 +710,14 @@ pub fn next_project(tally: [f32; BUILDING_COUNT], free_bed: bool) -> Building {
         return Building::House;
     }
     winner(tally)
+}
+
+/// Whether a citizen takes a meal this tick. Hunger is settled wherever they
+/// are already standing at the granary rather than only when eating is the most
+/// pressing thing they could be doing, so nobody starves on a full store
+/// because the cold happened to be worse.
+pub fn takes_a_meal(needs: &Needs, at_granary: bool, food: u32) -> bool {
+    needs.get(NeedKind::Food).pressing && at_granary && food >= FOOD_PER_MEAL
 }
 
 /// Whether there is enough fuel behind the fire to break ground on anything.
@@ -843,7 +853,6 @@ pub fn construction(
     let tally = tally_votes(&people, &mayor);
     let building = next_project(tally, free_home(&beds, &homes).is_some());
     ballot.tally = tally;
-    ballot.decided = Some(building);
     if let Some(pos) = next_plot(&taken) {
         construction.site = Some(Site {
             pos,
@@ -919,7 +928,7 @@ pub fn citizen_ai(
 
         // Eating is what makes the food need met this tick, so it happens before
         // the needs are stepped.
-        let eating = duty == Duty::Eat && at_centre && granary.food >= FOOD_PER_MEAL;
+        let eating = takes_a_meal(&citizen.needs, at_centre, granary.food);
         if eating {
             granary.food -= FOOD_PER_MEAL;
         }
@@ -2004,5 +2013,49 @@ mod tests {
     #[test]
     fn a_party_of_one_does_not_divide_by_zero() {
         assert!(Needs::founder(0, 0).level(NeedKind::Food).is_finite());
+    }
+
+    #[test]
+    fn a_meal_needs_hunger_a_granary_and_something_in_it() {
+        let mut hungry = Needs::newcomer();
+        set(
+            &mut hungry,
+            NeedKind::Food,
+            NeedKind::Food.rules().low,
+            true,
+        );
+        assert!(takes_a_meal(&hungry, true, FOOD_PER_MEAL));
+        assert!(
+            !takes_a_meal(&hungry, true, 0),
+            "an empty granary feeds nobody"
+        );
+        assert!(
+            !takes_a_meal(&hungry, false, FOOD_PER_MEAL),
+            "and it has to be walked to"
+        );
+        assert!(
+            !takes_a_meal(&Needs::newcomer(), true, FOOD_PER_MEAL),
+            "a fed citizen does not help themselves"
+        );
+    }
+
+    #[test]
+    fn a_starving_citizen_eats_even_while_something_worse_is_on_their_mind() {
+        let mut desperate = Needs::newcomer();
+        set(&mut desperate, NeedKind::Food, 25.0, true);
+        set(&mut desperate, NeedKind::Warmth, 2.0, true);
+        assert!(
+            desperate.shortfall(NeedKind::Warmth) > desperate.shortfall(NeedKind::Food),
+            "this citizen is worse off for cold than for hunger"
+        );
+        assert_eq!(
+            choose_duty(&desperate, None),
+            Duty::WarmUp,
+            "so the cold is what they walk towards"
+        );
+        assert!(
+            takes_a_meal(&desperate, true, FOOD_PER_MEAL),
+            "but nobody starves standing on the granary"
+        );
     }
 }
