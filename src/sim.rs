@@ -597,8 +597,6 @@ pub fn trade_fit(stat: f32, experience: f32) -> f32 {
     (FIT_FLOOR + stat * FIT_STAT + experience.clamp(0.0, 1.0) * FIT_PRACTICE).min(FIT_CEILING)
 }
 
-/// What a citizen brings to the work. `focus_mult` is one until the mood layer
-/// exists to move it.
 /// What a citizen is losing to one need going unmet, weighted against the
 /// others. Continuous all the way down, with the last of a need costing more
 /// than the first of it, because a need at a tenth is a different thing from a
@@ -832,6 +830,9 @@ pub fn focus_band(focus: f32) -> Focus {
     }
 }
 
+/// What a citizen brings to the work: what the colony raised in them, scaled by
+/// how much of themselves they have to give today and by how well they fit the
+/// trade. The one product every consequence of a mismatch comes out of.
 pub fn effective_stat(base: f32, focus_mult: f32, trade_fit_mult: f32) -> f32 {
     base * focus_mult * trade_fit_mult
 }
@@ -2979,9 +2980,14 @@ pub fn aging(mut citizens: Query<&mut Citizen>) {
 
 /// The middle of a colony, which is what one citizen's stat is read against.
 /// Sorts in place because the caller owns the scratch and nobody else wants it.
-pub fn median(values: &mut [f32]) -> f32 {
+/// The middle of a set, and what to say when the set is empty. The second is a
+/// parameter because these are asked about scales that do not share a zero: a
+/// stat runs nought to one and a mood runs nought to a hundred, and a neutral
+/// borrowed from the wrong one reads as a real reading of a colony that is not
+/// there any more.
+pub fn median(values: &mut [f32], empty: f32) -> f32 {
     if values.is_empty() {
-        return FORMATION_NEUTRAL;
+        return empty;
     }
     values.sort_by(f32::total_cmp);
     values[values.len() / 2]
@@ -5883,13 +5889,13 @@ mod tests {
     #[test]
     fn the_middle_of_a_colony_is_the_middle_of_what_it_has() {
         assert_eq!(
-            median(&mut []),
+            median(&mut [], FORMATION_NEUTRAL),
             FORMATION_NEUTRAL,
             "an empty colony is unremarkable"
         );
-        assert_eq!(median(&mut [0.4]), 0.4);
+        assert_eq!(median(&mut [0.4], FORMATION_NEUTRAL), 0.4);
         assert_eq!(
-            median(&mut [0.9, 0.1, 0.5]),
+            median(&mut [0.9, 0.1, 0.5], FORMATION_NEUTRAL),
             0.5,
             "and order does not matter"
         );

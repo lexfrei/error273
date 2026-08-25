@@ -5,8 +5,9 @@
 use bevy::prelude::*;
 
 use crate::sim::{
-    BUILDINGS, Cargo, Citizen, Patches, Pos, Regard, STAT_COUNT, STATS, Structure, estimate,
-    focus_band, focus_of, hardship_status, is_known, median, on_frame, regard_of, world_is_bounded,
+    BUILDINGS, Cargo, Citizen, FORMATION_NEUTRAL, MOOD_BASE, Patches, Pos, Regard, STAT_COUNT,
+    STATS, Structure, estimate, focus_band, focus_of, hardship_status, is_known, median, on_frame,
+    regard_of, world_is_bounded,
 };
 use crate::status::{CitizenCard, Readings, Status, status_lines};
 
@@ -37,10 +38,10 @@ pub fn print_status(
             .iter()
             .map(|citizen| citizen.upbringing.stats().of(stat))
             .collect();
-        stats[stat as usize] = median(&mut held);
+        stats[stat as usize] = median(&mut held, FORMATION_NEUTRAL);
     }
     let mut moods: Vec<f32> = citizens.iter().map(|citizen| citizen.mood).collect();
-    let mood = median(&mut moods);
+    let mood = median(&mut moods, MOOD_BASE);
     let card = citizens
         .iter()
         .max_by(|a, b| a.age.total_cmp(&b.age))

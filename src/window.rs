@@ -14,9 +14,10 @@ use bevy::sprite::Anchor;
 use bevy::window::WindowResolution;
 
 use crate::sim::{
-    Air, BUILDINGS, Building, CENTER, Cargo, Citizen, Construction, GENERATOR_HEAT, NeedKind,
-    Patches, Pos, Regard, STAT_COUNT, STATS, Structure, VIEW_RADIUS, estimate, focus_band,
-    focus_of, hardship_status, is_known, median, on_frame, regard_of,
+    Air, BUILDINGS, Building, CENTER, Cargo, Citizen, Construction, FORMATION_NEUTRAL,
+    GENERATOR_HEAT, MOOD_BASE, NeedKind, Patches, Pos, Regard, STAT_COUNT, STATS, Structure,
+    VIEW_RADIUS, estimate, focus_band, focus_of, hardship_status, is_known, median, on_frame,
+    regard_of,
 };
 use crate::status::{CitizenCard, Readings, STATUS_LINES, Status, status_lines};
 use crate::tempo::{TICK_MS_DEFAULT, ladder_step};
@@ -289,10 +290,10 @@ fn paint_status(
             .iter()
             .map(|citizen| citizen.upbringing.stats().of(stat))
             .collect();
-        stats[stat as usize] = median(&mut held);
+        stats[stat as usize] = median(&mut held, FORMATION_NEUTRAL);
     }
     let mut moods: Vec<f32> = citizens.iter().map(|citizen| citizen.mood).collect();
-    let mood = median(&mut moods);
+    let mood = median(&mut moods, MOOD_BASE);
     let card = citizens
         .iter()
         .max_by(|a, b| a.age.total_cmp(&b.age))
