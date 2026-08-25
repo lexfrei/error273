@@ -35,6 +35,10 @@ pub const fn per_day(rate: f32) -> f32 {
     rate / ticks_per_day() as f32
 }
 
+pub const fn per_season(rate: f32) -> f32 {
+    rate / ticks_per_season() as f32
+}
+
 pub const fn per_year(rate: f32) -> f32 {
     rate / ticks_per_year() as f32
 }
@@ -178,6 +182,14 @@ pub const CATCHUP_WEIGHT: f32 = 0.12;
 /// How far either side of the middle the part nobody can account for reaches.
 pub const RESIDUAL_SPREAD: f32 = 0.25;
 pub const STAT_SALT: u64 = 0x51;
+// A body hardens to cold with exposure and loses it again without it. The
+// diving women of Korea and Japan ran a basal metabolic rate about 5% above
+// standard in summer against 35% in winter, and the seasonal swing vanished
+// entirely once wetsuits cut the exposure. Gained over a season of working the
+// cold, lost over three of not.
+pub const ACCLIMATION_WORTH: f32 = 0.15;
+pub const ACCLIMATION_GAIN: f32 = per_season(1.0);
+pub const ACCLIMATION_LOSS: f32 = per_season(1.0 / 3.0);
 // How much more than it spends a colony must be able to fetch before it takes
 // on another mouth. The rate it is judged on is a season's average, and the
 // season that binds is the one that puts nothing back, so this margin is the
@@ -786,6 +798,8 @@ pub struct Citizen {
     pub needs: Needs,
     /// What the colony has raised in them, and what it started from.
     pub upbringing: Upbringing,
+    /// How far their body has learned the cold, which the cold takes back.
+    pub acclimated: f32,
     /// Years lived, on the same clock the calendar prints.
     pub age: f32,
     /// The span this one would reach if nothing got them first.
@@ -842,6 +856,26 @@ pub fn hardiness(age: f32, lifespan: f32) -> f32 {
 
 /// Whether a cold night carries a citizen off. What hardiness they have left is
 /// what stands between them and the roll, so winter is what does the killing.
+/// One hour of a body either learning the cold or forgetting it.
+pub fn acclimation_step(acclimated: f32, in_the_cold: bool) -> f32 {
+    let moved = if in_the_cold {
+        acclimated + ACCLIMATION_GAIN
+    } else {
+        acclimated - ACCLIMATION_LOSS
+    };
+    moved.clamp(0.0, 1.0)
+}
+
+/// What actually stands between a citizen and a cold night: what age has left
+/// them, scaled by what the colony raised in them, plus what the winters have
+/// taught their body since. Only the last term survives their own span, because
+/// it is not something age took away.
+pub fn cold_resistance(age: f32, lifespan: f32, raised: f32, acclimated: f32) -> f32 {
+    let left = hardiness(age, lifespan);
+    let bodily = raised / FORMATION_NEUTRAL;
+    (left * bodily + acclimated * ACCLIMATION_WORTH).clamp(0.0, 1.0)
+}
+
 pub fn cold_takes(hardiness: f32, roll: f32) -> bool {
     roll < (1.0 - hardiness) * COLD_SNAP_LETHALITY
 }
@@ -1461,6 +1495,7 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
             Citizen {
                 needs: Needs::founder(i, CITIZENS),
                 upbringing: Upbringing::grown(seed),
+                acclimated: 0.0,
                 age: founder_age(i, CITIZENS),
                 lifespan: lifespan_of(seed),
                 seed,
@@ -1718,6 +1753,7 @@ pub fn colony_growth(
             Citizen {
                 needs: Needs::newcomer(),
                 upbringing: Upbringing::born(seed),
+                acclimated: 0.0,
                 age: 0.0,
                 lifespan: lifespan_of(seed),
                 seed,
@@ -1781,9 +1817,16 @@ pub fn citizen_ai(
         // The snap is the air they are standing in, not how desperate they are.
         // Rolling only once a citizen is already freezing would mean frailty
         // never got to decide anything.
+        citizen.acclimated = acclimation_step(citizen.acclimated, !warm);
         if cold_night && !warm {
             let roll = noise(citizen.seed, COLD_SNAP_SALT.wrapping_add(tick.0));
-            if cold_takes(hardiness(citizen.age, citizen.lifespan), roll) {
+            let resistance = cold_resistance(
+                citizen.age,
+                citizen.lifespan,
+                citizen.upbringing.stats().of(Stat::Hardiness),
+                citizen.acclimated,
+            );
+            if cold_takes(resistance, roll) {
                 commands.entity(entity).despawn();
                 continue;
             }
@@ -3985,5 +4028,77 @@ mod tests {
         };
         assert!(gained(ADULT_AGE + 1.0) > gained(CATCHUP_UNTIL - 1.0));
         assert_eq!(gained(CATCHUP_UNTIL), 0.0, "and then it is over");
+    }
+
+    #[test]
+    fn a_body_hardens_in_the_cold_and_softens_out_of_it() {
+        let mut acclimated = 0.0;
+        for _ in 0..(ticks_per_day() * DAYS_PER_SEASON) {
+            acclimated = acclimation_step(acclimated, true);
+        }
+        let hardened = acclimated;
+        assert!(hardened > 0.5, "a season of working the cold should tell");
+        for _ in 0..(ticks_per_day() * DAYS_PER_SEASON) {
+            acclimated = acclimation_step(acclimated, false);
+        }
+        assert!(
+            acclimated < hardened,
+            "and it goes again once the exposure stops"
+        );
+    }
+
+    #[test]
+    fn acclimation_never_leaves_its_range() {
+        let mut acclimated = 0.0;
+        for _ in 0..(ticks_per_year() * 5) {
+            acclimated = acclimation_step(acclimated, true);
+        }
+        assert!(acclimated <= 1.0);
+        for _ in 0..(ticks_per_year() * 5) {
+            acclimated = acclimation_step(acclimated, false);
+        }
+        assert!(acclimated >= 0.0);
+    }
+
+    #[test]
+    fn a_better_raised_citizen_stands_a_cold_night_longer() {
+        let age = FRAILTY_ONSET + 5.0;
+        let frail = cold_resistance(age, LIFESPAN_BASE, STAT_MIN, 0.0);
+        let sturdy = cold_resistance(age, LIFESPAN_BASE, STAT_MAX, 0.0);
+        assert!(
+            sturdy > frail,
+            "what the colony raised has to count for something"
+        );
+    }
+
+    #[test]
+    fn a_winter_of_working_outside_counts_for_something_too() {
+        let age = FRAILTY_ONSET + 5.0;
+        let soft = cold_resistance(age, LIFESPAN_BASE, FORMATION_NEUTRAL, 0.0);
+        let seasoned = cold_resistance(age, LIFESPAN_BASE, FORMATION_NEUTRAL, 1.0);
+        assert!(seasoned > soft);
+        assert!(
+            seasoned - soft <= ACCLIMATION_WORTH + 1e-6,
+            "but not more than a body can learn"
+        );
+    }
+
+    #[test]
+    fn nothing_a_citizen_learned_outlasts_their_own_span() {
+        let done = cold_resistance(LIFESPAN_BASE * 2.0, LIFESPAN_BASE, STAT_MAX, 1.0);
+        assert!(
+            done <= ACCLIMATION_WORTH + 1e-6,
+            "past their span all that is left is what the winters taught them"
+        );
+    }
+
+    #[test]
+    fn resistance_stays_a_probability() {
+        for raised in [STAT_MIN, FORMATION_NEUTRAL, STAT_MAX] {
+            for acclimated in [0.0, 0.5, 1.0] {
+                let resistance = cold_resistance(0.0, LIFESPAN_BASE, raised, acclimated);
+                assert!((0.0..=1.0).contains(&resistance));
+            }
+        }
     }
 }

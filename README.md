@@ -170,6 +170,8 @@ Every citizen has three things the colony never prints a number for: strength, w
 
 What a body lost it can partly make back. Strength and hardiness keep a catch-up that runs out over the years after adulthood, so a colony can repair some of a cohort it half-starved; wits close on the day the child is grown and do not reopen. Each stat is raised on what actually feeds it -- the body eats, hardiness is warmed, wits take whatever there was of either.
 
+Hardiness is the one a citizen keeps working on. A body left out in air below freezing learns the cold over a season and forgets it again over three, on top of whatever the childhood set, so a colony that works its haulers through winters is a colony of people who stand them better -- and a mild few years takes it back. What stands between a citizen and a cold night is therefore three things at once: what age has left them, what they were raised on, and what the winters since have taught them.
+
 Two children of one good decade still come out different, because a share of who anybody turns out to be is not something the colony did or could have watched. Somebody who walks in already grown has only that share, since the colony never saw their childhood: that is what the founding party is made of.
 
 ### Growing
