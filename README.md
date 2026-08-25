@@ -69,6 +69,7 @@ That is the whole frame: forty-nine cells across, the hearth in the middle, and 
 | `H` | a house, sleeping up to three citizens |
 | `V` | a hunter's hut |
 | `B` | a boiler, raising what the generator can burn to |
+| `P` | a waystation, a brazier and a woodshed out on the ground |
 | `+` | the plot the current project is going up on |
 | `T` | a treeline with wood still standing |
 | `t` | a treeline cut out |
@@ -80,7 +81,7 @@ That is the whole frame: forty-nine cells across, the hearth in the middle, and 
 | `z` | a citizen asleep at home |
 | `.` | open ground |
 
-Five lines sit under the map. The first is the tick counter, the date it works out to, and the air outside the fire's reach. The second is the living population, how many of them are working past the edge of the frame, and the four quantities that decide the run: fuel in the generator, food in the granary, and the wood and game still standing on the near ground -- the twenty-four cells around the hearth the colony lives off. A total over the whole world would only report how far the colony has wandered, so those two columns are the ground the colony works rather than the ground that exists. The third counts what has been built, names the project in progress with how much timber it has swallowed so far, and gives the last ballot as votes for house, hut and boiler in that order. The fourth is the age pyramid -- children, grown citizens, the frail -- how many couples the colony has, and the middle of the colony for each of the three stats. That last is an aggregate and not a reveal: what any one citizen is stays hidden.
+Five lines sit under the map. The first is the tick counter, the date it works out to, and the air outside the fire's reach. The second is the living population, how many of them are working past the edge of the frame, and the four quantities that decide the run: fuel in the generator, food in the granary, and the wood and game still standing on the near ground -- the twenty-four cells around the hearth the colony lives off. A total over the whole world would only report how far the colony has wandered, so those two columns are the ground the colony works rather than the ground that exists. The third counts what has been built, names the project in progress with how much timber it has swallowed so far, and gives the last ballot as votes for house, hut, boiler and waystation in that order. The fourth is the age pyramid -- children, grown citizens, the frail -- how many couples the colony has, and the middle of the colony for each of the three stats. That last is an aggregate and not a reveal: what any one citizen is stays hidden.
 
 ## Running it
 
@@ -141,9 +142,17 @@ The air outside the generator's reach follows the calendar: a cosine through the
 
 Treelines and hunting grounds grow back a little every day towards a cap of their own, in spring, summer and autumn. Nothing grows back in winter, which is what makes winter a thing to be survived rather than worked through: whatever is standing when it starts is the whole of what there is until spring. For the same reason the colony will not break ground on a project in winter, and will not break ground at all unless it holds half again what it wants per head behind the fire.
 
+### A fire that is not the hearth
+
+A citizen who walks back to warmth instead of working loses hours, and the ballot's second tier counts them. Where those hours were walked decides what they buy. Hours lost all around the hearth ask for a bigger hearth, because a boiler holds the freezing line six cells further out for everyone; hours lost in one direction ask for a fire over there, because moving warmth only helps if there is somewhere to move it to. The vote is the decision and the site is arithmetic: a waystation goes to the middle of the walks that asked for one, each citizen weighing as many hours as they lost.
+
+It cannot go wherever it likes. A waystation is a brazier and a woodshed, and the shed is filled by haulers walking out to it, so a post further out than somebody can reach and come back from is a post that never burns. The site is drawn back along the line until it is one that can be fed, which means a chain of them cannot be laid in one reach: it grows a link at a time, each fire close enough to the last that the colony can supply it.
+
+Every shed short of wood claims one hauler -- the one standing nearest it -- and takes their load ahead of the hearth, out of the same surplus that pays for building and out of nothing else. One each is what makes a chain a standing tax that grows with its length rather than a levy that empties the hearth the moment a single post stands. A brazier burns its shed down on its own clock whether or not anybody is there, so keeping one lit is a cost the colony carries for as long as it wants the ground.
+
 ### Looking
 
-A colony spares a few hands for looking rather than working, and the qualification is having nothing the matter: a citizen the survival tier of the vote has nothing to say about is a citizen whose day the colony is not already spending. They walk a leg at a time in a direction and a distance drawn from the world seed, and the distances are heavy-tailed -- half the legs are longer than twice the shortest, a tenth longer than ten times it, and the rare one runs a very long way. That shape is the search-theory answer for sparse targets worth coming back to; it is the mathematics that is borrowed and not the animal behaviour it was once argued from, because the tracks behind that argument turned out to be an artefact of the sensor.
+A colony spares a few hands for looking rather than working, and the qualification is having nothing the matter: a citizen the survival tier of the vote has nothing to say about is a citizen whose day the colony is not already spending. They set out from the furthest fire the colony keeps, which is what a chain of fires is for, and walk a leg at a time in a direction and a distance drawn from the world seed, and the distances are heavy-tailed -- half the legs are longer than twice the shortest, a tenth longer than ten times it, and the rare one runs a very long way. That shape is the search-theory answer for sparse targets worth coming back to; it is the mathematics that is borrowed and not the animal behaviour it was once argued from, because the tracks behind that argument turned out to be an artefact of the sensor.
 
 Nothing orders a scout home. What brings them back is the same leash every citizen carries: warmth's marks rise with every cell they put between themselves and the fire, so a scout turns for home when the walk back is all the warmth they have left, and no rule about expeditions had to be written to make that happen. A scout brings back the map and nothing else -- ground they have stood in becomes ground the colony can work, and the colony never unlearns it, even after the square itself is dropped from memory and drawn again.
 

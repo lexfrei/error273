@@ -333,11 +333,13 @@ fn structure_mark(building: Building) -> Mark {
             Building::House => 'H',
             Building::HuntersHut => 'V',
             Building::GeneratorUpgrade => 'B',
+            Building::Waystation => 'P',
         },
         ink: match building {
             Building::House => Color::srgb(0.73, 0.77, 0.83),
             Building::HuntersHut => Color::srgb(0.71, 0.81, 0.72),
             Building::GeneratorUpgrade => Color::srgb(0.87, 0.71, 0.55),
+            Building::Waystation => Color::srgb(0.94, 0.62, 0.32),
         },
     }
 }

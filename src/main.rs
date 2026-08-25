@@ -59,6 +59,7 @@ fn main() {
                 sim::construction,
                 sim::citizen_ai,
                 sim::colony_growth,
+                sim::burn_caches,
                 sim::burn_fuel,
             )
                 .chain(),

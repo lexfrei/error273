@@ -154,10 +154,33 @@ pub const PLOT_MAX_RADIUS: i32 = R - 3;
 pub const HOUSE_WOOD_COST: u32 = 12;
 pub const HUT_WOOD_COST: u32 = 16;
 pub const BOILER_WOOD_COST: u32 = 24;
+/// A waystation is a brazier and a woodshed, not a boiler: cheaper to raise
+/// than the fire it stands in for, and dear to keep.
+pub const WAYSTATION_WOOD_COST: u32 = 18;
 // How much further a boiler pushes the generator's ceiling once the woodpile
 // can keep it fed.
 pub const UPGRADE_HEAT: f32 = 18.0;
-pub const BUILDING_COUNT: usize = 3;
+/// What a lit waystation puts out. It buys nothing at the hearth and the whole
+/// of its own distance for whoever is working out there.
+pub const WAYSTATION_HEAT: f32 = 40.0;
+/// What it holds, and what it burns. A small cache on purpose: a chain of them
+/// is meant to be a standing tax on the workforce, not a thing filled once.
+pub const WAYSTATION_CACHE: u32 = 12;
+pub const WAYSTATION_BURN_EVERY: u64 = 6 * TICKS_PER_HOUR;
+/// How far past the warmth it already has the colony may put a new fire.
+///
+/// A post is stocked by haulers walking out to it, and a hauler can only go as
+/// far as their own warmth carries them there and back. So a chain cannot be
+/// laid in one reach: it grows a link at a time, each post standing close
+/// enough to the last that somebody can supply it, and this is the length of a
+/// link.
+pub const WAYSTATION_STEP: f32 = (NEED_MAX - CAUTION_BASE) / 2.0;
+/// How far out a boiler can still hold the freezing line. A citizen whose walk
+/// back starts further out than a bigger fire can ever reach is not asking for
+/// a bigger fire; they are asking for a nearer one.
+pub const BOILER_REACHES: i32 =
+    ((GENERATOR_HEAT + UPGRADE_HEAT + AMBIENT_MEAN) / HEAT_FALLOFF) as i32;
+pub const BUILDING_COUNT: usize = 4;
 pub const CARGO_COUNT: usize = 2;
 pub const SEASON_DAYS: usize = DAYS_PER_SEASON as usize;
 
@@ -923,6 +946,10 @@ pub struct Needs {
     /// it back to the fire, so what the cold takes from them is hours, and no
     /// measure of how unmet a need got can see an hour.
     detour: u32,
+    /// Where those walks were walked, summed as offsets from the hearth. The
+    /// count alone says a citizen is losing hours; this says whether moving a
+    /// fire would give them back, and where to move it to.
+    detour_from: IVec2,
 }
 
 impl Needs {
@@ -934,7 +961,11 @@ impl Needs {
             burden: 0.0,
         }; NEED_COUNT];
         needs[NeedKind::Warmth as usize].level = START_WARMTH;
-        let mut needs = Needs { needs, detour: 0 };
+        let mut needs = Needs {
+            needs,
+            detour: 0,
+            detour_from: IVec2::ZERO,
+        };
         needs.forget_before_ballot();
         needs
     }
@@ -986,14 +1017,24 @@ impl Needs {
             self.needs[kind as usize].burden = 0.0;
         }
         self.detour = 0;
+        self.detour_from = IVec2::ZERO;
     }
 
     /// One tick of a citizen's ballot window, and whether it went on getting
     /// warm rather than on work.
-    pub fn spend(&mut self, on_getting_warm: bool) {
+    pub fn spend(&mut self, on_getting_warm: bool, at: IVec2) {
         if on_getting_warm {
             self.detour = self.detour.saturating_add(1);
+            self.detour_from += at - CENTER;
         }
+    }
+
+    /// The middle of the walks back to the fire this citizen has made, if they
+    /// have made any. Walks scattered evenly around the hearth average out to
+    /// the hearth itself, which is the honest answer: there is no one place to
+    /// put a fire for somebody who loses hours in every direction.
+    pub fn detour_middle(&self) -> Option<IVec2> {
+        (self.detour > 0).then(|| CENTER + self.detour_from / self.detour as i32)
     }
 
     /// What the walk back to the fire has cost, in the same currency as a need:
@@ -1078,12 +1119,20 @@ pub struct Outside<'w> {
 
 /// Everything the colony's own work touches, gathered into one borrow so the
 /// systems that change it keep a readable signature.
+/// Every waystation shed the colony keeps. Held apart from the citizens by
+/// `Without`, because both want a position and only one may have it mutably.
+pub type Sheds<'w, 's> =
+    Query<'w, 's, (&'static Pos, &'static mut Cache), (With<Structure>, Without<Citizen>)>;
+
 #[derive(SystemParam)]
-pub struct Colony<'w> {
+pub struct Colony<'w, 's> {
     pub generator: ResMut<'w, Generator>,
     pub granary: ResMut<'w, Granary>,
     pub patches: ResMut<'w, Patches>,
     pub construction: ResMut<'w, Construction>,
+    /// The sheds at the waystations, which are a store like any other and are
+    /// filled by the same haulers.
+    pub posts: Sheds<'w, 's>,
 }
 
 /// Everything the colony has put by, gathered into one borrow so readers do not
@@ -1389,12 +1438,14 @@ pub enum Building {
     House,
     HuntersHut,
     GeneratorUpgrade,
+    Waystation,
 }
 
 pub const BUILDINGS: [Building; BUILDING_COUNT] = [
     Building::House,
     Building::HuntersHut,
     Building::GeneratorUpgrade,
+    Building::Waystation,
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -1417,6 +1468,10 @@ impl Building {
             Building::GeneratorUpgrade => BuildingRules {
                 cost: BOILER_WOOD_COST,
                 name: "Boiler",
+            },
+            Building::Waystation => BuildingRules {
+                cost: WAYSTATION_WOOD_COST,
+                name: "Post",
             },
         }
     }
@@ -1455,6 +1510,12 @@ pub struct Ballot {
 /// A finished building standing on a plot.
 #[derive(Component)]
 pub struct Structure(pub Building);
+
+/// The woodshed at a waystation. The brazier burns from it and haulers fill it,
+/// which is what makes a chain of them a standing tax on the workforce rather
+/// than a thing built once and forgotten.
+#[derive(Component, Default)]
+pub struct Cache(pub u32);
 
 /// How many of each building stand, recounted every tick so nothing has to be
 /// kept in step by hand.
@@ -2121,11 +2182,28 @@ pub fn update_diverting(diverting: bool, fuel: u32) -> bool {
 }
 
 /// Where a load is wanted. Only timber is ever wanted anywhere but the centre.
-pub fn delivery_target(cargo: Cargo, diverting: bool, site: Option<IVec2>) -> IVec2 {
-    match (cargo, site) {
-        (Cargo::Wood, Some(pos)) if diverting => pos,
-        _ => CENTER,
+pub fn delivery_target(
+    cargo: Cargo,
+    diverting: bool,
+    site: Option<IVec2>,
+    claimed: Option<IVec2>,
+) -> IVec2 {
+    if cargo == Cargo::Wood {
+        if let Some(pos) = site
+            && diverting
+        {
+            return pos;
+        }
+        // A shed short of wood claims one hauler, the one nearest it, and takes
+        // their load ahead of the hearth. One each is what makes it a tax that
+        // grows with the length of a chain rather than a conscription that
+        // empties the hearth the moment a single post stands. It is paid out of
+        // the same surplus that pays for building and out of nothing else.
+        if diverting && let Some(post) = claimed {
+            return post;
+        }
     }
+    CENTER
 }
 
 /// The building that answers a given need, and the whole of the mapping: every
@@ -2160,9 +2238,49 @@ pub fn vote_of(needs: &Needs) -> Option<Building> {
     // a starving colony votes food whatever its haulers are walking, and a
     // comfortable one is free to spend the ballot on efficiency.
     if needs.detour_burden() > 0.0 {
-        return Some(Building::GeneratorUpgrade);
+        // A bigger hearth answers hours lost all around it; a nearer fire
+        // answers hours lost in one direction, and only the second is worth
+        // moving warmth for.
+        let concentrated = needs
+            .detour_middle()
+            .is_some_and(|at| (at - CENTER).abs().max_element() > BOILER_REACHES);
+        return Some(if concentrated {
+            Building::Waystation
+        } else {
+            Building::GeneratorUpgrade
+        });
     }
     None
+}
+
+/// Where a waystation goes: the middle of the walks that asked for one, each
+/// citizen weighing as many hours as they lost. Choosing the spot is arithmetic
+/// and not a decision -- the decision was the vote.
+pub fn waystation_site(people: &[Needs], air: &Air) -> Option<IVec2> {
+    let mut hours = 0;
+    let mut sum = IVec2::ZERO;
+    for needs in people {
+        if vote_of(needs) != Some(Building::Waystation) {
+            continue;
+        }
+        let Some(middle) = needs.detour_middle() else {
+            continue;
+        };
+        hours += needs.detour;
+        sum += (middle - CENTER) * needs.detour as i32;
+    }
+    if hours == 0 {
+        return None;
+    }
+    // Where the walks concentrate is where a post is wanted; whether it can be
+    // supplied is another question, and the second one decides. A post further
+    // out than a hauler can reach and return from is a post that never burns,
+    // so the site is drawn back along the line until it is one that can be fed.
+    let mut site = CENTER + sum / hours as i32;
+    while site != CENTER && cost_of_getting_home(site, air) > WAYSTATION_STEP {
+        site = step_toward(site, CENTER);
+    }
+    (site != CENTER).then_some(site)
 }
 
 /// The ballot: one voice each, on top of whatever the mayor's office is
@@ -2503,6 +2621,17 @@ pub fn advance_calendar(tick: Res<Tick>, mut calendar: ResMut<Calendar>) {
     *calendar = calendar_at(tick.0);
 }
 
+/// Every waystation burns its own shed down on its own clock, whether or not
+/// anybody is standing at it. Keeping one lit is a standing cost.
+pub fn burn_caches(tick: Res<Tick>, mut posts: Query<&mut Cache>) {
+    if !tick.0.is_multiple_of(WAYSTATION_BURN_EVERY) {
+        return;
+    }
+    for mut cache in &mut posts {
+        cache.0 = cache.0.saturating_sub(1);
+    }
+}
+
 pub fn burn_fuel(
     tick: Res<Tick>,
     built: Res<Built>,
@@ -2524,13 +2653,25 @@ pub fn advance_weather(
     tick: Res<Tick>,
     built: Res<Built>,
     generator: Res<Generator>,
+    posts: Query<(&Pos, &Cache)>,
     mut air: ResMut<Air>,
 ) {
+    let mut fires = vec![Fire {
+        at: CENTER,
+        output: generator_output(generator.fuel, built.of(Building::GeneratorUpgrade)),
+    }];
+    // A waystation with an empty shed is a place to stand and nothing more.
+    fires.extend(
+        posts
+            .iter()
+            .filter(|(_, cache)| cache.0 > 0)
+            .map(|(pos, _)| Fire {
+                at: pos.0,
+                output: WAYSTATION_HEAT,
+            }),
+    );
     *air = Air {
-        fires: vec![Fire {
-            at: CENTER,
-            output: generator_output(generator.fuel, built.of(Building::GeneratorUpgrade)),
-        }],
+        fires,
         ambient: ambient_at(tick.0),
     };
 }
@@ -2550,7 +2691,7 @@ pub fn regrow_patches(tick: Res<Tick>, calendar: Res<Calendar>, mut patches: Res
 /// exactly the citizen whose day the colony is not already spending. A tour
 /// lasts a season, because the question of who can be spared is worth asking
 /// again by then.
-pub fn send_scouts(tick: Res<Tick>, mut citizens: Query<(&Pos, &mut Citizen)>) {
+pub fn send_scouts(tick: Res<Tick>, air: Res<Air>, mut citizens: Query<(&Pos, &mut Citizen)>) {
     if !tick.0.is_multiple_of(ticks_per_season()) {
         return;
     }
@@ -2574,11 +2715,21 @@ pub fn send_scouts(tick: Res<Tick>, mut citizens: Query<(&Pos, &mut Citizen)>) {
     // and the colony still decides the same way in every run.
     spare.sort_unstable();
     spare.truncate(wanted);
-    for (pos, mut citizen) in &mut citizens {
+    // A leg is drawn from the furthest fire the colony keeps, not from wherever
+    // the scout is standing. Walking out to the last post costs almost nothing,
+    // because the ground between is warm, and everything past it is the reach
+    // the chain was built to buy. It is what a chain of fires is for.
+    let setting_out = air
+        .fires
+        .iter()
+        .filter(|fire| fire.heat_at(fire.at, air.ambient) > 0.0)
+        .max_by_key(|fire| (fire.at - CENTER).abs().max_element())
+        .map_or(CENTER, |fire| fire.at);
+    for (_, mut citizen) in &mut citizens {
         citizen.scouting = spare
             .iter()
             .any(|(_, seed)| *seed == citizen.seed)
-            .then(|| scout_target(pos.0, citizen.seed, tick.0));
+            .then(|| scout_target(setting_out, citizen.seed, tick.0));
     }
 }
 
@@ -2716,6 +2867,7 @@ pub fn construction(
     mut council: Council,
     calendar: Res<Calendar>,
     generator: Res<Generator>,
+    air: Res<Air>,
     structures: Query<(&Pos, &Structure)>,
     mut citizens: Query<&mut Citizen>,
 ) {
@@ -2724,7 +2876,10 @@ pub fn construction(
 
     if let Some(site) = &council.construction.site {
         if site.delivered >= site.building.rules().cost {
-            commands.spawn((Pos(site.pos), Structure(site.building)));
+            let mut raised = commands.spawn((Pos(site.pos), Structure(site.building)));
+            if site.building == Building::Waystation {
+                raised.insert(Cache(0));
+            }
             council.construction.site = None;
         }
         return;
@@ -2753,7 +2908,15 @@ pub fn construction(
     for mut citizen in &mut citizens {
         citizen.needs.forget_before_ballot();
     }
-    if let Some(pos) = next_plot(&taken) {
+    // A waystation goes where the walks that asked for it were walked; anything
+    // else goes on the next free plot. Choosing the spot is arithmetic either
+    // way -- the decision was the vote.
+    let where_to = if building == Building::Waystation {
+        waystation_site(&people, &air).filter(|pos| !taken.contains(pos))
+    } else {
+        next_plot(&taken)
+    };
+    if let Some(pos) = where_to {
         council.construction.site = Some(Site {
             pos,
             building,
@@ -2876,6 +3039,33 @@ pub fn citizen_ai(
     mut citizens: Query<(Entity, &mut Pos, &mut Citizen)>,
 ) {
     let air = &*air;
+    // Every shed short of wood claims the wood-carrier standing nearest it, one
+    // each, worked out before anybody moves so that the same colony state always
+    // makes the same claims.
+    let mut hungry: Vec<IVec2> = colony
+        .posts
+        .iter()
+        .filter(|(_, cache)| cache.0 < WAYSTATION_CACHE)
+        .map(|(pos, _)| pos.0)
+        .collect();
+    hungry.sort_by_key(|post| ((post - CENTER).abs().max_element(), post.x, post.y));
+    let mut carriers: Vec<(Entity, IVec2)> = citizens
+        .iter()
+        .filter(|(_, _, citizen)| citizen.carrying == Some(Cargo::Wood))
+        .map(|(entity, pos, _)| (entity, pos.0))
+        .collect();
+    let mut claims: Vec<(Entity, IVec2)> = Vec::new();
+    for post in hungry {
+        let Some(index) = carriers
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, (_, at))| ((post - *at).abs().max_element(), at.x, at.y))
+            .map(|(index, _)| index)
+        else {
+            break;
+        };
+        claims.push((carriers.swap_remove(index).0, post));
+    }
     let site_pos = colony.construction.site.as_ref().map(|site| site.pos);
     let population = citizens.iter().count();
     // Who is already committed to fetching what, kept up to date as citizens
@@ -2946,7 +3136,11 @@ pub fn citizen_ai(
             huts: built.of(Building::HuntersHut),
         };
         if let Some(cargo) = citizen.carrying {
-            let drop_off = delivery_target(cargo, colony.construction.diverting, site_pos);
+            let claimed = claims
+                .iter()
+                .find(|(who, _)| *who == entity)
+                .map(|(_, post)| *post);
+            let drop_off = delivery_target(cargo, colony.construction.diverting, site_pos, claimed);
             if (pos.0 - drop_off).abs().max_element() <= 1 {
                 // What a citizen carries home is the one place what the colony
                 // raised in them turns into capacity rather than survival.
@@ -2968,8 +3162,25 @@ pub fn citizen_ai(
                 {
                     site.delivered += to_the_site;
                 }
+                // Wood set down at a post goes in that post's shed rather than
+                // on the hearth; the hauler walked there instead of home.
+                let to_a_shed = (cargo == Cargo::Wood && drop_off != CENTER && to_the_site == 0)
+                    .then(|| {
+                        colony
+                            .posts
+                            .iter_mut()
+                            .find(|(pos, _)| pos.0 == drop_off)
+                            .map(|(_, mut cache)| {
+                                let room = WAYSTATION_CACHE.saturating_sub(cache.0);
+                                let stowed = brought.min(room);
+                                cache.0 += stowed;
+                                stowed
+                            })
+                    })
+                    .flatten()
+                    .unwrap_or(0);
                 match cargo {
-                    Cargo::Wood => colony.generator.fuel += brought - to_the_site,
+                    Cargo::Wood => colony.generator.fuel += brought - to_the_site - to_a_shed,
                     Cargo::Food => colony.granary.food += brought,
                 }
                 flow.delivered(brought);
@@ -3017,7 +3228,7 @@ pub fn citizen_ai(
         let duty = choose_duty(&citizen.needs, citizen.carrying, grown, &marks);
         // Only a working citizen has working hours for the cold to take.
         if grown {
-            citizen.needs.spend(duty == Duty::WarmUp);
+            citizen.needs.spend(duty == Duty::WarmUp, pos.0);
             // A trade is kept up by working it and goes to rust otherwise.
             let at_work = matches!(duty, Duty::Gather | Duty::Deliver);
             if at_work {
@@ -3030,7 +3241,11 @@ pub fn citizen_ai(
             }
         }
         let drop_off = citizen.carrying.map_or(CENTER, |cargo| {
-            delivery_target(cargo, colony.construction.diverting, site_pos)
+            let claimed = claims
+                .iter()
+                .find(|(who, _)| *who == entity)
+                .map(|(_, post)| *post);
+            delivery_target(cargo, colony.construction.diverting, site_pos, claimed)
         });
         // A scout is walking to look, not to fetch, so the leg stands in for the
         // patch. Nothing brings them back but the leash: warmth's marks rise
@@ -3766,10 +3981,13 @@ mod tests {
     #[test]
     fn food_goes_to_the_granary_even_while_a_house_is_going_up() {
         let site = IVec2::new(1, 2);
-        assert_eq!(delivery_target(Cargo::Wood, true, Some(site)), site);
-        assert_eq!(delivery_target(Cargo::Wood, false, Some(site)), CENTER);
+        assert_eq!(delivery_target(Cargo::Wood, true, Some(site), None), site);
         assert_eq!(
-            delivery_target(Cargo::Food, true, Some(site)),
+            delivery_target(Cargo::Wood, false, Some(site), None),
+            CENTER
+        );
+        assert_eq!(
+            delivery_target(Cargo::Food, true, Some(site), None),
             CENTER,
             "nobody builds a house out of venison"
         );
@@ -3777,8 +3995,8 @@ mod tests {
 
     #[test]
     fn wood_goes_to_the_fire_when_nothing_is_being_built() {
-        assert_eq!(delivery_target(Cargo::Wood, true, None), CENTER);
-        assert_eq!(delivery_target(Cargo::Wood, false, None), CENTER);
+        assert_eq!(delivery_target(Cargo::Wood, true, None, None), CENTER);
+        assert_eq!(delivery_target(Cargo::Wood, false, None, None), CENTER);
     }
 
     #[test]
@@ -3860,18 +4078,21 @@ mod tests {
     }
 
     #[test]
-    fn every_need_has_a_building_that_answers_it() {
+    fn every_need_has_a_building_of_its_own_that_answers_it() {
         let mut answers = Vec::new();
         for kind in NEEDS {
             let building = building_for(kind);
             assert!(!answers.contains(&building), "{kind:?} shares a remedy");
             answers.push(building);
         }
-        assert_eq!(
-            answers.len(),
-            BUILDING_COUNT,
-            "every building is somebody's remedy"
-        );
+        assert_eq!(answers.len(), NEED_COUNT);
+        // What is left over is elected by the other tier of the ballot: nothing
+        // going wrong asks for a waystation, only hours going to waste do.
+        let spare: Vec<Building> = BUILDINGS
+            .into_iter()
+            .filter(|building| !answers.contains(building))
+            .collect();
+        assert_eq!(spare, vec![Building::Waystation]);
     }
 
     fn mayor_leaning(building: Building, weight: f32) -> Mayor {
@@ -4923,7 +5144,7 @@ mod tests {
     fn survival_outranks_efficiency_however_long_the_walk_was() {
         let mut needs = owed(NeedKind::Food, 0.5);
         for _ in 0..5000 {
-            needs.spend(true);
+            needs.spend(true, CENTER);
         }
         assert!(needs.detour_burden() > needs.get(NeedKind::Food).burden);
         assert_eq!(
@@ -4937,7 +5158,7 @@ mod tests {
     fn a_citizen_the_colony_is_holding_up_votes_on_what_wastes_its_day() {
         let mut needs = Needs::newcomer();
         for _ in 0..100 {
-            needs.spend(true);
+            needs.spend(true, CENTER);
         }
         assert_eq!(vote_of(&needs), Some(Building::GeneratorUpgrade));
     }
@@ -4971,7 +5192,7 @@ mod tests {
     fn the_ballot_forgets_both_the_needs_and_the_hours() {
         let mut needs = owed(NeedKind::Food, 500.0);
         for _ in 0..100 {
-            needs.spend(true);
+            needs.spend(true, CENTER);
         }
         needs.forget_before_ballot();
         for kind in NEEDS {
@@ -6713,6 +6934,91 @@ mod tests {
             cold.warmth_target(home, outpost),
             home,
             "and with nothing lit anywhere there is only a roof to go to"
+        );
+    }
+
+    /// A citizen who has walked back to the fire from each of these places.
+    fn detoured_from(walks: &[IVec2]) -> Needs {
+        let mut needs = Needs::newcomer();
+        for at in walks {
+            needs.spend(true, *at);
+        }
+        needs
+    }
+
+    #[test]
+    fn a_citizen_who_has_not_walked_back_has_nowhere_to_put_a_fire() {
+        assert_eq!(Needs::newcomer().detour_middle(), None);
+        assert_eq!(vote_of(&Needs::newcomer()), None);
+    }
+
+    #[test]
+    fn walks_that_all_start_in_one_place_ask_for_a_fire_there() {
+        let out = CENTER + IVec2::new(BOILER_REACHES + 12, 0);
+        let needs = detoured_from(&[out, out + IVec2::new(1, 1), out - IVec2::new(1, 1), out]);
+        assert_eq!(
+            needs.detour_middle(),
+            Some(out),
+            "the middle of those walks is where they were walked"
+        );
+        assert_eq!(vote_of(&needs), Some(Building::Waystation));
+    }
+
+    #[test]
+    fn walks_that_start_all_around_the_hearth_ask_for_a_bigger_hearth() {
+        let far = BOILER_REACHES + 12;
+        let needs = detoured_from(&[
+            CENTER + IVec2::new(far, 0),
+            CENTER + IVec2::new(-far, 0),
+            CENTER + IVec2::new(0, far),
+            CENTER + IVec2::new(0, -far),
+        ]);
+        assert_eq!(
+            vote_of(&needs),
+            Some(Building::GeneratorUpgrade),
+            "walks scattered around the fire are not answered by moving it"
+        );
+    }
+
+    #[test]
+    fn walks_from_inside_what_a_boiler_reaches_ask_for_the_boiler() {
+        let near = CENTER + IVec2::new(BOILER_REACHES - 1, 0);
+        let needs = detoured_from(&[near, near, near]);
+        assert_eq!(
+            vote_of(&needs),
+            Some(Building::GeneratorUpgrade),
+            "a bigger fire still covers this walk, so it is the cheaper answer"
+        );
+    }
+
+    #[test]
+    fn a_boiler_reaches_as_far_as_a_boiler_reaches() {
+        let ambient = AMBIENT_MEAN;
+        let lit = one_fire(generator_output(FULL_BURN_FUEL, 1), ambient);
+        assert!(
+            lit.heat_at(CENTER + IVec2::new(BOILER_REACHES, 0)) >= 0.0,
+            "the mark has to be inside what an upgraded fire actually holds"
+        );
+        assert!(
+            lit.heat_at(CENTER + IVec2::new(BOILER_REACHES + 1, 0)) < 0.0,
+            "and one cell past it has to be outside"
+        );
+    }
+
+    #[test]
+    fn a_site_is_where_the_walks_that_asked_for_it_concentrate() {
+        let east = CENTER + IVec2::new(40, 0);
+        let west = CENTER + IVec2::new(-40, 0);
+        let asking = vec![detoured_from(&[east, east, east]), detoured_from(&[west])];
+        let site = waystation_site(&asking, &mean_day()).expect("somebody asked");
+        assert!(
+            (site - CENTER).x > 0,
+            "three walks east against one west put the fire east, at {site:?}"
+        );
+        assert_eq!(
+            waystation_site(&[Needs::newcomer()], &mean_day()),
+            None,
+            "nobody asking means nowhere to put one"
         );
     }
 }
