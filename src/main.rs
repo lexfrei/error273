@@ -43,6 +43,7 @@ fn main() {
         .insert_resource(Generator { fuel: START_FUEL })
         .insert_resource(Granary { food: START_FOOD })
         .init_resource::<sim::Missing>()
+        .init_resource::<sim::Weather>()
         .add_systems(Startup, sim::setup)
         .add_systems(
             SimSchedule,

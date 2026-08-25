@@ -113,6 +113,20 @@ pub const DIURNAL_SWING: f32 = 6.0;
 /// When the cold is worst. Before dawn rather than at midnight, which is where
 /// it falls outside a window as well.
 pub const COLDEST_HOUR: u64 = 5;
+/// Weather, as against climate: how far today has wandered from the season it
+/// belongs to, and how long that wandering lasts.
+///
+/// The shape is the one stochastic weather generators use for temperature --
+/// today's departure from the seasonal mean is a fraction of yesterday's plus a
+/// fresh push, which is a first-order autoregression. What is borrowed is the
+/// shape; the numbers are ours, because a degree here is a warmth a citizen
+/// loses and not a degree Celsius.
+pub const FRONT_DAYS: f32 = 6.0;
+/// How hard one day can push, and how far a front may ever take the air from
+/// the season underneath it.
+pub const FRONT_STEP: f32 = 2.5;
+pub const FRONT_CAP: f32 = 8.0;
+pub const FRONT_SALT: u64 = 0x71;
 // A colony gets one winter to learn on. The ramp is on the cold half only, so
 // summers are the same every year.
 pub const SEVERITY_FIRST: f32 = 0.55;
@@ -2111,7 +2125,29 @@ pub fn diurnal_at(tick: u64) -> f32 {
     DIURNAL_SWING / 2.0 * phase.cos()
 }
 
-/// The air outside the generator's reach at the hour a tick falls on.
+/// One day's step of the weather away from the climate. Deterministic in the
+/// world seed and the day, so a run replays: the same world gets the same
+/// weather every time it is founded.
+pub fn front_step(front: f32, world: u64, day: u64) -> f32 {
+    // What survives a day, derived from how long a front is said to last rather
+    // than stated a second time beside it: the two would drift apart and only
+    // one of them would be the one the weather actually used.
+    let memory = (-1.0 / FRONT_DAYS).exp();
+    let push = (noise(world, FRONT_SALT.wrapping_add(day)) * 2.0 - 1.0) * FRONT_STEP;
+    (front * memory + push).clamp(-FRONT_CAP, FRONT_CAP)
+}
+
+/// How far the weather has wandered from the climate, and when it last moved.
+/// The front needs a day of memory, which is why it lives here rather than
+/// being a function of the tick like the season and the hour are.
+#[derive(Resource, Default)]
+pub struct Weather {
+    pub front: f32,
+    pub day: u64,
+}
+
+/// The air outside the generator's reach at the hour a tick falls on, before
+/// the weather is added to it.
 pub fn ambient_at(tick: u64) -> f32 {
     climate_at(tick) + diurnal_at(tick)
 }
@@ -3071,8 +3107,17 @@ pub fn advance_weather(
     built: Res<Built>,
     generator: Res<Generator>,
     posts: Query<(&Pos, &Cache)>,
+    mut weather: ResMut<Weather>,
     mut air: ResMut<Air>,
 ) {
+    // The weather moves once a day and the climate and the hour move with every
+    // tick, so the front is stepped on the day boundary and carried across the
+    // hours in between.
+    let day = tick.0 / ticks_per_day();
+    while weather.day < day {
+        weather.day += 1;
+        weather.front = front_step(weather.front, WORLD_SEED, weather.day);
+    }
     let mut fires = vec![Fire {
         at: CENTER,
         output: generator_output(generator.fuel, built.of(Building::GeneratorUpgrade)),
@@ -3089,7 +3134,7 @@ pub fn advance_weather(
     );
     *air = Air {
         fires,
-        ambient: ambient_at(tick.0),
+        ambient: ambient_at(tick.0) + weather.front,
     };
 }
 
@@ -7927,5 +7972,97 @@ mod tests {
         let midsummer = day_of(SEVERITY_FULL_YEAR, DAYS_PER_SEASON + DAYS_PER_SEASON / 2);
         assert!(climate_at(midwinter) < AMBIENT_MEAN);
         assert!(climate_at(midsummer) > AMBIENT_MEAN);
+    }
+
+    /// The front on each of a run of days, from a still start.
+    fn front_over(days: u64) -> Vec<f32> {
+        let mut front = 0.0;
+        (0..days)
+            .map(|day| {
+                front = front_step(front, WORLD_SEED, day);
+                front
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_front_fades_over_the_days_it_says_it_does() {
+        // Measured off the weather the colony actually gets rather than off the
+        // arithmetic that makes it: how much of a day's departure is still
+        // there a correlation time later, averaged over twenty years.
+        let days = front_over(days_per_year() * 20);
+        let lag = FRONT_DAYS as usize;
+        let power: f32 = days.iter().map(|f| f * f).sum::<f32>() / days.len() as f32;
+        let carried: f32 = days
+            .windows(lag + 1)
+            .map(|window| window[0] * window[lag])
+            .sum::<f32>()
+            / (days.len() - lag) as f32;
+        let left = carried / power;
+        assert!(
+            (left - 1.0 / std::f32::consts::E).abs() < 0.1,
+            "a front should be down to about a third after {FRONT_DAYS} days, it is at {left}"
+        );
+    }
+
+    #[test]
+    fn a_front_never_takes_the_air_further_than_it_is_allowed() {
+        for front in front_over(ticks_per_year() / ticks_per_day() * 20) {
+            assert!(
+                front.abs() <= FRONT_CAP + f32::EPSILON,
+                "a front reached {front}, past a cap of {FRONT_CAP}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_front_wanders_both_ways_and_comes_back_to_the_season() {
+        let days = front_over(days_per_year() * 20);
+        assert!(
+            days.iter().any(|f| *f > 2.0),
+            "no warm spell in twenty years"
+        );
+        assert!(days.iter().any(|f| *f < -2.0), "no cold snap either");
+        let mean = days.iter().sum::<f32>() / days.len() as f32;
+        assert!(
+            mean.abs() < 0.5,
+            "over twenty years the weather should average to the season, not {mean}"
+        );
+    }
+
+    #[test]
+    fn today_looks_more_like_yesterday_than_like_last_week() {
+        let days = front_over(days_per_year() * 10);
+        let gap = |apart: usize| -> f32 {
+            days.windows(apart + 1)
+                .map(|w| (w[apart] - w[0]).abs())
+                .sum::<f32>()
+                / (days.len() - apart) as f32
+        };
+        assert!(
+            gap(1) < gap(7),
+            "a day apart should differ less than a week apart: {} against {}",
+            gap(1),
+            gap(7)
+        );
+    }
+
+    #[test]
+    fn the_same_world_gets_the_same_weather_every_run() {
+        assert_eq!(front_over(500), front_over(500));
+        let other: Vec<f32> = {
+            let mut front = 0.0;
+            (0..500)
+                .map(|day| {
+                    front = front_step(front, WORLD_SEED ^ 0xff, day);
+                    front
+                })
+                .collect()
+        };
+        assert_ne!(
+            front_over(500),
+            other,
+            "a different world gets its own weather"
+        );
     }
 }

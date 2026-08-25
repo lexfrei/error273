@@ -162,6 +162,8 @@ The air outside the generator's reach follows the calendar: a cosine through the
 
 A day has a shape of its own on top of that. The air swings six degrees between the small hours and the late afternoon, coldest before dawn, and a whole day averages out to exactly the season it sits in -- so the year is untouched and what is new is that when to go out is now a question with an answer. The swing is the same in a colony's first year as in its fortieth: the ramp above is about how hard a year is, and this is about the difference between noon and four in the morning.
 
+On top of both there is weather, which is a different thing from climate: how far today has wandered from the season it belongs to. Today's departure is most of yesterday's plus a fresh push, so cold spells and mild ones last about six days and arrive in runs rather than one day at a time, and they never take the air more than eight degrees from where the season says it should be. It is drawn from the world's own seed, so the same world gets the same weather every time it is founded.
+
 Treelines and hunting grounds grow back a little every day towards a cap of their own, in spring, summer and autumn. Nothing grows back in winter, which is what makes winter a thing to be survived rather than worked through: whatever is standing when it starts is the whole of what there is until spring. For the same reason the colony will not break ground on a project in winter, and will not break ground at all unless it holds half again what it wants per head behind the fire.
 
 ### The fire
