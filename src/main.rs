@@ -1,5 +1,7 @@
+#[cfg(not(feature = "window"))]
 mod render;
 mod sim;
+mod status;
 #[cfg(feature = "window")]
 mod window;
 
@@ -9,8 +11,8 @@ use bevy::prelude::*;
 #[cfg(not(feature = "window"))]
 use std::time::Duration;
 
-/// Headless steps the colony from its own run loop; the window steps it from
-/// the fixed 80 ms schedule, so both tick at the same rate.
+/// The window steps the colony from the fixed schedule; headless steps it from
+/// its own run loop, so both tick at the same rate.
 #[cfg(feature = "window")]
 use bevy::prelude::FixedUpdate as SimSchedule;
 #[cfg(not(feature = "window"))]
@@ -24,7 +26,7 @@ use sim::{
 fn main() {
     let mut app = App::new();
     #[cfg(not(feature = "window"))]
-    app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_millis(80))));
+    app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(headless_step())));
     #[cfg(feature = "window")]
     app.add_plugins(window::WindowRendererPlugin);
     app.init_resource::<Tick>()
@@ -37,10 +39,7 @@ fn main() {
         .init_resource::<Air>()
         .insert_resource(Generator { fuel: START_FUEL })
         .insert_resource(Granary { food: START_FOOD })
-        .add_systems(
-            Startup,
-            (render::clear_screen.run_if(terminal_draws), sim::setup).chain(),
-        )
+        .add_systems(Startup, sim::setup)
         .add_systems(
             SimSchedule,
             (
@@ -54,14 +53,23 @@ fn main() {
                 sim::citizen_ai,
                 sim::colony_growth,
                 sim::burn_fuel,
-                render::render.run_if(terminal_draws),
             )
                 .chain(),
-        )
-        .run();
+        );
+    #[cfg(not(feature = "window"))]
+    app.add_systems(SimSchedule, render::print_status.after(sim::burn_fuel));
+    app.run();
 }
 
-/// The terminal renderer stands down when the window renderer owns the output.
-fn terminal_draws() -> bool {
-    !cfg!(feature = "window")
+/// How long the headless build waits between ticks. Watching wants the eighty
+/// milliseconds; measuring a lifetime does not, and a citizen takes fifteen
+/// game years to grow up, so `ERROR273_TURBO` drops the wait and runs as fast
+/// as the machine will go. The status lines are the same either way.
+#[cfg(not(feature = "window"))]
+fn headless_step() -> Duration {
+    if std::env::var_os("ERROR273_TURBO").is_some() {
+        Duration::ZERO
+    } else {
+        Duration::from_millis(80)
+    }
 }

@@ -9,16 +9,15 @@
 use std::time::Duration;
 
 use bevy::camera::ScalingMode;
-use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 use bevy::window::WindowResolution;
 
 use crate::sim::{
-    ADULT_AGE, AMBIENT, BUILDINGS, Ballot, Building, Built, CENTER, Calendar, Cargo, Citizen,
-    Construction, FRAILTY_ONSET, GENERATOR_HEAT, NeedKind, Pos, R, Stores, Structure, Tick,
-    couples, generator_output, heat_at, is_adult,
+    Air, BUILDINGS, Ballot, Building, CENTER, Cargo, Citizen, Construction, GENERATOR_HEAT,
+    NeedKind, Outside, Pos, R, Stores, Structure,
 };
+use crate::status::{STATUS_LINES, Status, status_lines};
 
 /// Matches the step the headless build gives `ScheduleRunnerPlugin`, so the
 /// colony lives at the same speed whichever renderer is watching it.
@@ -36,7 +35,6 @@ const MAP_SPAN: f32 = GRID as f32 * CELL;
 const GLYPH_SIZE: f32 = 18.0;
 const STATUS_SIZE: f32 = 15.0;
 const STATUS_LEAD: f32 = 22.0;
-const STATUS_LINES: usize = 4;
 const MARGIN: f32 = 14.0;
 
 const STATUS_SPAN: f32 = STATUS_LEAD * STATUS_LINES as f32;
@@ -91,16 +89,6 @@ struct Cell(IVec2);
 /// One of the status lines under the map, numbered from the top.
 #[derive(Component)]
 struct StatusLine(usize);
-
-/// What the status lines report, gathered into one borrow the way `Stores`
-/// gathers the stockpiles.
-#[derive(SystemParam)]
-struct Report<'w> {
-    tick: Res<'w, Tick>,
-    calendar: Res<'w, Calendar>,
-    construction: Res<'w, Construction>,
-    ballot: Res<'w, Ballot>,
-}
 
 pub struct WindowRendererPlugin;
 
@@ -171,8 +159,8 @@ fn spawn_board(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
 }
 
 fn paint_map(
+    air: Res<Air>,
     stores: Stores,
-    built: Res<Built>,
     construction: Res<Construction>,
     structures: Query<(&Pos, &Structure)>,
     citizens: Query<(&Pos, &Citizen)>,
@@ -201,9 +189,9 @@ fn paint_map(
     }
     grid[CENTER.y as usize][CENTER.x as usize] = GENERATOR;
 
-    let output = generator_output(stores.generator.fuel, built.of(Building::GeneratorUpgrade));
+    let air = *air;
     for (cell, mut sprite) in &mut tiles {
-        let ground = ground_of(cell.0, output);
+        let ground = ground_of(cell.0, air);
         if sprite.color != ground {
             sprite.color = ground;
         }
@@ -214,7 +202,7 @@ fn paint_map(
             text.clear();
             text.push(mark.glyph);
         }
-        let readable = lift(mark.ink, ground_of(cell.0, output));
+        let readable = lift(mark.ink, ground_of(cell.0, air));
         if ink.0 != readable {
             ink.0 = readable;
         }
@@ -222,8 +210,10 @@ fn paint_map(
 }
 
 fn paint_status(
-    report: Report,
+    outside: Outside,
     stores: Stores,
+    construction: Res<Construction>,
+    ballot: Res<Ballot>,
     structures: Query<&Structure>,
     citizens: Query<&Citizen>,
     mut lines: Query<(&StatusLine, &mut Text2d)>,
@@ -237,69 +227,32 @@ fn paint_status(
             .map(|patch| patch.amount)
             .sum()
     };
-    let standing_count = |building: Building| {
-        structures
-            .iter()
-            .filter(|structure| structure.0 == building)
-            .count()
-    };
-    let project = match &report.construction.site {
-        Some(site) => format!(
-            "{} {}/{}",
-            site.building.rules().name,
-            site.delivered,
-            site.building.rules().cost
-        ),
-        None => "none".to_string(),
-    };
-    let counts: Vec<String> = BUILDINGS
-        .into_iter()
-        .map(|building| format!("{} {:3}", building.rules().name, standing_count(building)))
-        .collect();
-    let votes: Vec<String> = BUILDINGS
-        .into_iter()
-        .map(|building| format!("{:.0}", report.ballot.tally[building as usize]))
-        .collect();
+    let mut buildings = [0usize; BUILDINGS.len()];
+    for structure in &structures {
+        buildings[structure.0 as usize] += 1;
+    }
     let ages: Vec<f32> = citizens.iter().map(|citizen| citizen.age).collect();
-    let alive = ages.len();
-    let children = ages.iter().filter(|age| !is_adult(**age)).count();
-    let frail = ages.iter().filter(|age| **age > FRAILTY_ONSET).count();
-    let status = [
-        format!(
-            "tick {:5}  year {}  {:<6}  day {:2}  hour {:02}",
-            report.tick.0,
-            report.calendar.year,
-            report.calendar.season.name(),
-            report.calendar.day,
-            report.calendar.hour
-        ),
-        format!(
-            "pop {:3}  fuel {:4}  food {:4}  wood {:4}  game {:4}",
-            alive,
-            stores.generator.fuel,
-            stores.granary.food,
-            standing(Cargo::Wood),
-            standing(Cargo::Food)
-        ),
-        format!(
-            "{}  project {}  vote {}",
-            counts.join("  "),
-            project,
-            votes.join("/")
-        ),
-        format!(
-            "under {:<2} {:3}  grown {:3}  over {:<2} {:3}  couples {:3}",
-            ADULT_AGE as u32,
-            children,
-            alive - children - frail,
-            FRAILTY_ONSET as u32,
-            frail,
-            couples(&ages)
-        ),
-    ];
+    let status = Status {
+        tick: outside.tick.0,
+        calendar: *outside.calendar,
+        ambient: outside.air.ambient,
+        alive: ages.len(),
+        fuel: stores.generator.fuel,
+        food: stores.granary.food,
+        wood: standing(Cargo::Wood),
+        game: standing(Cargo::Food),
+        buildings,
+        project: construction
+            .site
+            .as_ref()
+            .map(|site| (site.building, site.delivered)),
+        tally: ballot.tally,
+        ages,
+    };
+    let painted = status_lines(&status);
     for (line, mut text) in &mut lines {
-        if text.0 != status[line.0] {
-            text.0.clone_from(&status[line.0]);
+        if text.0 != painted[line.0] {
+            text.0.clone_from(&painted[line.0]);
         }
     }
 }
@@ -315,11 +268,11 @@ fn inside(p: IVec2) -> bool {
 
 /// Warmth as a background: the disc carries the heat map, the outside stays
 /// flat so the round shape reads at a glance.
-fn ground_of(p: IVec2, output: f32) -> Color {
+fn ground_of(p: IVec2, air: Air) -> Color {
     if !inside(p) {
         return VOID;
     }
-    let warmth = ((heat_at(p, output) - AMBIENT) / GENERATOR_HEAT).clamp(0.0, 1.0);
+    let warmth = ((air.heat_at(p) - air.ambient) / GENERATOR_HEAT).clamp(0.0, 1.0);
     if warmth < 0.5 {
         FROST.mix(&EMBER, warmth * 2.0).into()
     } else {
@@ -361,7 +314,11 @@ fn patch_mark(kind: Cargo, amount: u32) -> Mark {
 
 fn structure_mark(building: Building) -> Mark {
     Mark {
-        glyph: building.rules().glyph,
+        glyph: match building {
+            Building::House => 'H',
+            Building::HuntersHut => 'V',
+            Building::GeneratorUpgrade => 'B',
+        },
         ink: match building {
             Building::House => Color::srgb(0.73, 0.77, 0.83),
             Building::HuntersHut => Color::srgb(0.71, 0.81, 0.72),

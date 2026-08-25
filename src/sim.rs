@@ -392,6 +392,7 @@ pub struct Council<'w> {
 /// What the world outside is doing, for the systems that only read it.
 #[derive(SystemParam)]
 pub struct Outside<'w> {
+    pub tick: Res<'w, Tick>,
     pub calendar: Res<'w, Calendar>,
     pub air: Res<'w, Air>,
 }
@@ -467,7 +468,6 @@ pub const BUILDINGS: [Building; BUILDING_COUNT] = [
 #[derive(Debug, Clone, Copy)]
 pub struct BuildingRules {
     pub cost: u32,
-    pub glyph: char,
     pub name: &'static str,
 }
 
@@ -476,17 +476,14 @@ impl Building {
         match self {
             Building::House => BuildingRules {
                 cost: HOUSE_WOOD_COST,
-                glyph: 'H',
                 name: "House",
             },
             Building::HuntersHut => BuildingRules {
                 cost: HUT_WOOD_COST,
-                glyph: 'V',
                 name: "Hut",
             },
             Building::GeneratorUpgrade => BuildingRules {
                 cost: BOILER_WOOD_COST,
-                glyph: 'B',
                 name: "Boiler",
             },
         }
@@ -2107,18 +2104,15 @@ mod tests {
 
     #[test]
     fn every_building_costs_timber_and_can_be_told_apart() {
-        let mut glyphs = Vec::new();
+        let mut names = Vec::new();
         for building in BUILDINGS {
             let rules = building.rules();
             assert!(rules.cost > 0, "{building:?} must cost something");
             assert!(!rules.name.is_empty());
-            assert!(
-                !glyphs.contains(&rules.glyph),
-                "{building:?} reuses a glyph"
-            );
-            glyphs.push(rules.glyph);
+            assert!(!names.contains(&rules.name), "{building:?} reuses a name");
+            names.push(rules.name);
         }
-        assert_eq!(glyphs.len(), BUILDING_COUNT);
+        assert_eq!(names.len(), BUILDING_COUNT);
     }
 
     #[test]

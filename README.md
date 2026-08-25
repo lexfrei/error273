@@ -48,6 +48,8 @@ House  14  Hut   0  Boiler   0  project none  vote 28/2/0
 under 15   2  grown  20  over 40  10  couples  12
 ```
 
+The map below is the window's glyph set; the four lines under it are exactly what the headless build prints.
+
 | Symbol | Meaning |
 | --- | --- |
 | `#` | the generator, at the centre of the map |
@@ -76,7 +78,21 @@ rustup toolchain install stable
 cargo run
 ```
 
-It redraws in place about twelve times a second and exits on its own once everyone is dead. Ctrl+C ends it early.
+That opens a window and draws the map on square cells, twelve and a half ticks a second, with the four status lines under it. Every cell is tinted by how warm it is, so the fire's reach is a thing you can watch shrink through autumn. It exits on its own once everyone is dead; Ctrl+C ends it early.
+
+### The headless instrument
+
+```bash
+cargo run --no-default-features
+```
+
+The same simulation at the same step with no window and no map: the status lines go to stdout, one set per tick, and nothing else does. This is what the quality gates and the balance log read, which is why its output is treated as an interface rather than a display.
+
+```bash
+ERROR273_TURBO=1 cargo run --no-default-features
+```
+
+Same again with the wait between ticks dropped, so it runs as fast as the machine will go. A citizen takes fifteen game years to grow up and a life is about fifty-five; at eighty milliseconds a tick that is hours, and here it is minutes.
 
 ```bash
 cargo test

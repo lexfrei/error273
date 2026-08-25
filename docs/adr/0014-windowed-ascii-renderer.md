@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-25
+- Amended: 2026-08-25
 
 ## Context
 
@@ -14,3 +15,9 @@ An optional `window` cargo feature adds a Bevy 2D renderer: the same glyphs on 2
 ## Consequences
 
 The default build is untouched — no window, no GPU, the same dependencies and the same build time — and the terminal renderer stands down rather than being removed. Contrast is the renderer's responsibility, following Brogue's rule that a glyph stays readable whatever its background does, so every ink is lifted until it clears its own cell by a fixed margin of luminance. The glyph table and the status lines now exist twice, once per renderer; that is what keeping the two independent costs, and it is the thing to unify if a third one ever appears.
+
+## Amendment, 2026-08-25
+
+The window is the default build and the terminal map renderer is gone. Building with `--no-default-features` leaves the headless instrument: the same simulation on the same step, printing the status lines to stdout and drawing no map, which is what the quality gates and the balance log read. That mode also honours `ERROR273_TURBO`, which drops the wait between ticks so a run long enough to see a citizen grow up takes minutes rather than hours.
+
+Both duplications this ADR recorded are closed rather than deferred. The glyph table went with the terminal map, so the window's marks are now the only picture of the colony. The status lines moved into one module that both faces fill in and format through, which makes a reading that exists in one and not the other a compile error -- the drift had already happened once, since the window never showed the air temperature the terminal added.

@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# The windowed ASCII renderer. Off by default: the headless build must keep its
-# dependency set and its build time.
+# The window is how the game is meant to be watched, so it is the default.
+# Building with --no-default-features leaves the headless instrument: the same
+# simulation at the same step, printing its status lines to stdout and nothing
+# else, which is what the gates and the balance log read.
+default = ["window"]
 window = ["bevy/default_platform", "bevy/2d_bevy_render"]
 
 [dependencies]

@@ -1,6 +1,6 @@
 # 0001. Headless ECS with an ASCII terminal renderer
 
-- Status: accepted
+- Status: accepted, in part superseded by ADR 0014
 - Date: 2026-08-25
 
 ## Context
@@ -14,3 +14,5 @@ Rust with Bevy, running the `default_app` feature set with no window and no GPU,
 ## Consequences
 
 The prototype builds in seconds and the simulation logic is fully testable headless, with the renderer as one replaceable system among many. There is no editor and no GPU-accelerated UI, so all rendering and layout code is hand-rolled.
+
+The terminal half of this decision is superseded by ADR 0014: the ASCII map is drawn in a window now, and the terminal keeps only the status lines, as the instrument the gates read. The headless half stands unchanged -- the simulation still runs and is still tested with no window and no GPU, which is what made replacing the renderer cheap enough to do.
