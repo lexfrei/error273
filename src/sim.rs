@@ -197,6 +197,12 @@ pub const FORGET_BEYOND: i32 = SEARCH_RADII[1];
 /// works and not a shape the world used to have.
 pub const VIEW_RADIUS: i32 = SEARCH_RADII[0];
 
+/// Whether a cell is one the window draws. The world has no edge, so this is a
+/// statement about the frame and never about where anybody may walk.
+pub fn on_frame(cell: IVec2) -> bool {
+    (cell - CENTER).abs().max_element() <= VIEW_RADIUS
+}
+
 /// What a walk counts as when there is no work of that kind anywhere in reach.
 /// It is the longest walk there is, so a spare hand who found nothing never
 /// scores better than one who found work at the end of the world.
@@ -209,12 +215,6 @@ pub const WORLD_SEED: u64 = 0x2026;
 /// to follow where it is standing rather than how long it has been running.
 #[cfg(not(feature = "window"))]
 pub const WORLD_CELLS_HELD: usize = 1 << 20;
-
-/// Whether a cell is one the window draws. The world has no edge, so this is a
-/// statement about the frame and never about where anybody may walk.
-pub fn on_frame(cell: IVec2) -> bool {
-    (cell - CENTER).abs().max_element() <= VIEW_RADIUS
-}
 
 /// Whether that ceiling is being kept. The headless build checks it every tick,
 /// which is the only place it is checked: it is an instrument reading, and a
