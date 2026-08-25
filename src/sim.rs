@@ -1713,11 +1713,17 @@ pub fn richness_at(distance: i32) -> f32 {
 
 /// What a chunk holds.
 ///
-/// FORBIDDEN, and this is the door it would come in by: nothing here may read a
-/// neighbouring chunk. A feature written across a border forces the neighbour to
-/// exist, which forces its neighbour, and the cascade is a named failure in the
-/// games that shipped it. Everything below takes the world seed and this
-/// chunk's own coordinates, and the hearth, which is a constant.
+/// FORBIDDEN, and this is the door it would come in by: nothing here may read
+/// what a neighbouring chunk holds. A feature written across a border forces the
+/// neighbour to exist, which forces its neighbour, and the cascade is a named
+/// failure in the games that shipped it.
+///
+/// Reading past the border is not the same as reading the neighbour. `field_at`
+/// is keyed to absolute coordinates and steps a lattice whose corners fall
+/// wherever they fall, which is exactly what makes the field continuous across a
+/// border without either side of it having to exist. The line is between a pure
+/// function of the seed and a position, which may be evaluated anywhere in any
+/// order, and a look at another chunk's contents, which may not.
 ///
 /// Nothing here may draw from `Lineage` either. It hands out sequential numbers
 /// and is order-dependent by construction, so a world that asked it for
