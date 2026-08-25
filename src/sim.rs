@@ -122,9 +122,7 @@ pub const CITIZENS: usize = 30;
 
 // Harvest patches sit on the rim, out past the last buildable ring of plots.
 pub const PATCH_RADIUS: i32 = R - 1;
-pub const WOOD_CELLS: usize = 8;
 pub const WOOD_PER_CELL: u32 = 80;
-pub const FOOD_CELLS: usize = 4;
 pub const FOOD_PER_CELL: u32 = 90;
 
 // What the colony starts with. These belong beside the rates they are tuned
@@ -157,6 +155,34 @@ pub const UPGRADE_HEAT: f32 = 18.0;
 pub const BUILDING_COUNT: usize = 3;
 pub const CARGO_COUNT: usize = 2;
 pub const SEASON_DAYS: usize = DAYS_PER_SEASON as usize;
+
+// The world has no edge. It is generated in squares, each one a pure function
+// of the world seed and its own coordinates, so a chunk may be realised in any
+// order and a run still replays.
+pub const CHUNK: i32 = 64;
+/// Cells to a step of the lattice the generated field is interpolated over.
+pub const LATTICE: i32 = 24;
+/// How far out the best trip is. Richness rises until here and is flat past it,
+/// so this is where yield-against-walk peaks; inside the old rim richness is
+/// exactly what it always was, which is what keeps the early game unretuned.
+pub const RICHNESS_BEST: i32 = PATCH_RADIUS + 160;
+/// How many cells of walking each step of richness costs to reach.
+pub const RICHNESS_RUN: i32 = 80;
+pub const RICHNESS_CAP: f32 = (RICHNESS_BEST - PATCH_RADIUS) as f32 / RICHNESS_RUN as f32;
+/// Patches to a chunk, set from the density the founding rings ran at -- twelve
+/// of them inside a disc of radius seventeen, which is about one patch in every
+/// seventy-six cells -- so the early game is not quietly retuned by the world
+/// changing shape underneath it.
+pub const PATCHES_PER_CHUNK: usize = 54;
+pub const WOOD_SHARE: f32 = 2.0 / 3.0;
+/// How far the generated field is allowed to move a patch's worth either way.
+pub const FIELD_SWING: f32 = 0.5;
+pub const CHUNK_SALT: u64 = 0x61;
+pub const FIELD_SALT: u64 = 0x62;
+/// How many chunks out from the hearth's own the colony starts with realised.
+pub const FOUNDING_REACH: i32 = 1;
+/// The seed the world is generated from. One number, fixed, so a run replays.
+pub const WORLD_SEED: u64 = 0x2026;
 
 // Stats are raised, not rolled. A childhood is banked hour by hour and settled
 // at named ages, heaviest at the start, and what the colony could not account
@@ -1120,14 +1146,17 @@ pub enum Duty {
 /// Deterministic noise in `[0, 1)` from a pair of integers. The simulation has
 /// no entropy source and wants none: two runs of the same build must tell the
 /// same story, or a balance log is worth nothing.
-pub fn noise(seed: u64, salt: u64) -> f32 {
+pub fn mix(seed: u64, salt: u64) -> u64 {
     let mut z = seed
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
         .wrapping_add(salt.wrapping_mul(0xBF58_476D_1CE4_E5B9));
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    (z >> 40) as f32 / (1u64 << 24) as f32
+    z ^ (z >> 31)
+}
+
+pub fn noise(seed: u64, salt: u64) -> f32 {
+    (mix(seed, salt) >> 40) as f32 / (1u64 << 24) as f32
 }
 
 /// How much of a citizen the colony cannot account for. A starving colony can
@@ -1462,23 +1491,107 @@ pub fn take_from_patch(patches: &mut Patches, pos: IVec2, wanted: u32) -> u32 {
     }
 }
 
-pub fn patch_sites() -> Vec<Patch> {
-    let ring = |count: usize, offset: f32, kind: Cargo, amount: u32| {
-        (0..count)
-            .map(|i| Patch {
-                pos: ring_pos(
-                    PATCH_RADIUS as f32,
-                    (i as f32 + offset) / count as f32 * std::f32::consts::TAU,
-                ),
-                kind,
-                amount,
-                cap: amount,
-            })
-            .collect::<Vec<Patch>>()
+pub fn chunk_of(cell: IVec2) -> IVec2 {
+    IVec2::new(cell.x.div_euclid(CHUNK), cell.y.div_euclid(CHUNK))
+}
+
+fn coords(at: IVec2) -> u64 {
+    ((at.x as u32 as u64) << 32) | at.y as u32 as u64
+}
+
+fn smooth(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The generated axis of the world: value noise on a coarse lattice, which is
+/// what it is rather than Perlin -- there are no gradients here, only hashed
+/// corners interpolated between. A per-cell hash has no continuity at all, and
+/// a field is exactly the thing that needs neighbouring cells to resemble one
+/// another.
+pub fn field_at(world: u64, cell: IVec2) -> f32 {
+    let corner = IVec2::new(cell.x.div_euclid(LATTICE), cell.y.div_euclid(LATTICE));
+    let across = smooth(cell.x.rem_euclid(LATTICE) as f32 / LATTICE as f32);
+    let down = smooth(cell.y.rem_euclid(LATTICE) as f32 / LATTICE as f32);
+    let at = |dx: i32, dy: i32| {
+        noise(
+            world,
+            FIELD_SALT.wrapping_add(coords(corner + IVec2::new(dx, dy))),
+        )
     };
-    let mut patches = ring(WOOD_CELLS, 0.0, Cargo::Wood, WOOD_PER_CELL);
-    // Quarter-slot offset keeps the hunting grounds off the treelines.
-    patches.extend(ring(FOOD_CELLS, 0.25, Cargo::Food, FOOD_PER_CELL));
+    let top = at(0, 0) + (at(1, 0) - at(0, 0)) * across;
+    let bottom = at(0, 1) + (at(1, 1) - at(0, 1)) * across;
+    top + (bottom - top) * down
+}
+
+/// How much better a patch is for being this far out. Flat inside the old rim,
+/// so nothing about the early game changes, then rising until it stops.
+pub fn richness_at(distance: i32) -> f32 {
+    let out = (distance - PATCH_RADIUS).max(0) as f32;
+    1.0 + (out / RICHNESS_RUN as f32).min(RICHNESS_CAP)
+}
+
+/// What a chunk holds.
+///
+/// FORBIDDEN, and this is the door it would come in by: nothing here may read a
+/// neighbouring chunk. A feature written across a border forces the neighbour to
+/// exist, which forces its neighbour, and the cascade is a named failure in the
+/// games that shipped it. Everything below takes the world seed and this
+/// chunk's own coordinates, and the hearth, which is a constant.
+///
+/// Nothing here may draw from `Lineage` either. It hands out sequential numbers
+/// and is order-dependent by construction, so a world that asked it for
+/// anything would stop replaying the moment a chunk was realised out of order.
+pub fn chunk_patches(world: u64, chunk: IVec2) -> Vec<Patch> {
+    let seed = mix(world, CHUNK_SALT.wrapping_add(coords(chunk)));
+    let corner = chunk * CHUNK;
+    let mut patches: Vec<Patch> = Vec::with_capacity(PATCHES_PER_CHUNK);
+    for index in 0..PATCHES_PER_CHUNK as u64 {
+        let pos = corner
+            + IVec2::new(
+                (noise(seed, index * 4) * CHUNK as f32) as i32,
+                (noise(seed, index * 4 + 1) * CHUNK as f32) as i32,
+            );
+        // The ground the colony builds on is cleared, measured the way the rings
+        // that stood there were.
+        if pos.as_vec2().distance(CENTER.as_vec2()) <= PLOT_MAX_RADIUS as f32 {
+            continue;
+        }
+        if patches.iter().any(|patch| patch.pos == pos) {
+            continue;
+        }
+        let kind = if noise(seed, index * 4 + 2) < WOOD_SHARE {
+            Cargo::Wood
+        } else {
+            Cargo::Food
+        };
+        let base = match kind {
+            Cargo::Wood => WOOD_PER_CELL,
+            Cargo::Food => FOOD_PER_CELL,
+        } as f32;
+        let out = (pos - CENTER).abs().max_element();
+        let worth = 1.0 - FIELD_SWING / 2.0 + field_at(world, pos) * FIELD_SWING;
+        let cap = (base * richness_at(out) * worth).round().max(1.0) as u32;
+        patches.push(Patch {
+            pos,
+            kind,
+            amount: cap,
+            cap,
+        });
+    }
+    patches
+}
+
+/// The world the colony is founded in: the chunks around the hearth, generated
+/// rather than placed. There is no edge here -- this is only how much of the
+/// world has been asked for so far.
+pub fn founding_world(world: u64) -> Vec<Patch> {
+    let home = chunk_of(CENTER);
+    let mut patches = Vec::new();
+    for cx in -FOUNDING_REACH..=FOUNDING_REACH {
+        for cy in -FOUNDING_REACH..=FOUNDING_REACH {
+            patches.extend(chunk_patches(world, home + IVec2::new(cx, cy)));
+        }
+    }
     patches
 }
 
@@ -1847,7 +1960,7 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
         ));
     }
 
-    commands.insert_resource(Patches(patch_sites()));
+    commands.insert_resource(Patches(founding_world(WORLD_SEED)));
 }
 
 pub fn advance_tick(mut tick: ResMut<Tick>) {
@@ -3343,7 +3456,10 @@ mod tests {
 
     #[test]
     fn plots_never_cover_the_generator_or_a_harvest_patch() {
-        let patches: Vec<IVec2> = patch_sites().into_iter().map(|patch| patch.pos).collect();
+        let patches: Vec<IVec2> = founding_world(WORLD_SEED)
+            .into_iter()
+            .map(|patch| patch.pos)
+            .collect();
         for site in every_plot() {
             assert_ne!(site, CENTER);
             assert!(
@@ -3355,7 +3471,7 @@ mod tests {
 
     #[test]
     fn harvest_patches_are_distinct_and_carry_both_kinds() {
-        let patches = patch_sites();
+        let patches = founding_world(WORLD_SEED);
         assert!(patches.iter().any(|p| p.kind == Cargo::Wood));
         assert!(patches.iter().any(|p| p.kind == Cargo::Food));
         for (i, a) in patches.iter().enumerate() {
@@ -5076,6 +5192,168 @@ mod tests {
         assert!(
             !may_be_taken(wanted, wanted, true),
             "and the people already doing it are not the answer to it"
+        );
+    }
+
+    #[test]
+    fn a_cell_belongs_to_one_chunk_on_either_side_of_the_hearth() {
+        assert_eq!(chunk_of(IVec2::new(0, 0)), IVec2::new(0, 0));
+        assert_eq!(chunk_of(IVec2::new(CHUNK - 1, CHUNK - 1)), IVec2::new(0, 0));
+        assert_eq!(chunk_of(IVec2::new(CHUNK, 0)), IVec2::new(1, 0));
+        assert_eq!(
+            chunk_of(IVec2::new(-1, -1)),
+            IVec2::new(-1, -1),
+            "a world with no edge has chunks on the far side of zero"
+        );
+        assert_eq!(chunk_of(IVec2::new(-CHUNK, -CHUNK)), IVec2::new(-1, -1));
+    }
+
+    #[test]
+    fn a_chunk_comes_out_the_same_however_it_is_asked_for() {
+        let world = 1234;
+        let chunk = IVec2::new(3, -2);
+        let once = chunk_patches(world, chunk);
+        // Ask for a scatter of other chunks in between, which is the whole
+        // point: order must not matter.
+        for other in [IVec2::new(0, 0), IVec2::new(-9, 4), IVec2::new(3, -1)] {
+            let _ = chunk_patches(world, other);
+        }
+        let again = chunk_patches(world, chunk);
+        assert_eq!(once.len(), again.len());
+        for (a, b) in once.iter().zip(&again) {
+            assert_eq!(a.pos, b.pos);
+            assert_eq!(a.kind, b.kind);
+            assert_eq!(a.cap, b.cap);
+        }
+    }
+
+    #[test]
+    fn different_chunks_and_different_worlds_hold_different_things() {
+        let here = chunk_patches(7, IVec2::new(2, 2));
+        let next_door = chunk_patches(7, IVec2::new(3, 2));
+        let elsewhere = chunk_patches(8, IVec2::new(2, 2));
+        assert_ne!(here[0].pos, next_door[0].pos);
+        assert_ne!(
+            here[0].pos, elsewhere[0].pos,
+            "the world seed has to matter"
+        );
+    }
+
+    #[test]
+    fn every_patch_a_chunk_holds_is_inside_that_chunk() {
+        for cx in -2..3 {
+            for cy in -2..3 {
+                let chunk = IVec2::new(cx, cy);
+                for patch in chunk_patches(99, chunk) {
+                    assert_eq!(
+                        chunk_of(patch.pos),
+                        chunk,
+                        "a chunk that writes outside itself forces its neighbour to exist"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_two_patches_of_a_chunk_stand_on_one_cell() {
+        for cx in -2..3 {
+            let patches = chunk_patches(5, IVec2::new(cx, 1));
+            for (i, a) in patches.iter().enumerate() {
+                for b in &patches[i + 1..] {
+                    assert_ne!(a.pos, b.pos);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_grows_on_the_hearth_or_the_ground_the_colony_builds_on() {
+        // Plots are laid out on rings measured the way the heat is, so the
+        // ground they stand on is cleared the same way.
+        for chunk in [IVec2::new(0, 0), IVec2::new(-1, 0), IVec2::new(0, -1)] {
+            for patch in chunk_patches(31, chunk) {
+                let out = patch.pos.as_vec2().distance(CENTER.as_vec2());
+                assert!(
+                    out > PLOT_MAX_RADIUS as f32,
+                    "a patch at {out} cells is standing on a building plot"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_field_changes_gently_from_one_cell_to_the_next() {
+        let world = 42;
+        for x in -80..80 {
+            let here = field_at(world, IVec2::new(x, 5));
+            let next = field_at(world, IVec2::new(x + 1, 5));
+            assert!((0.0..=1.0).contains(&here));
+            assert!(
+                (here - next).abs() < 0.5,
+                "a hash has no continuity; a field must have some, at x {x}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_field_is_not_flat() {
+        let world = 42;
+        let sampled: Vec<f32> = (0..200)
+            .map(|x| field_at(world, IVec2::new(x * 3, 0)))
+            .collect();
+        let high = sampled.iter().copied().fold(f32::MIN, f32::max);
+        let low = sampled.iter().copied().fold(f32::MAX, f32::min);
+        assert!(high - low > 0.4, "a field that never varies is a constant");
+    }
+
+    #[test]
+    fn the_near_ring_is_no_richer_than_it_ever_was() {
+        for distance in 0..=PATCH_RADIUS {
+            assert_eq!(
+                richness_at(distance),
+                1.0,
+                "the early game must not be retuned by this"
+            );
+        }
+        assert!(
+            richness_at(PATCH_RADIUS + 1) > 1.0,
+            "and it has to rise past it"
+        );
+    }
+
+    #[test]
+    fn richness_rises_with_distance_and_then_stops() {
+        assert!(richness_at(200) > richness_at(100));
+        assert_eq!(
+            richness_at(10_000),
+            richness_at(RICHNESS_BEST),
+            "past the best of it, further is only further"
+        );
+    }
+
+    #[test]
+    fn the_world_near_the_hearth_is_about_as_thick_as_the_rings_were() {
+        // Density rather than a count: the rings put twelve patches inside a
+        // disc of radius seventeen, and that is the thing the early game was
+        // balanced against.
+        // Eight treelines and four hunting grounds, on a ring of radius
+        // seventeen. That is the world the early game was balanced against.
+        let rings_held = 12.0;
+        let rings_had = rings_held / (std::f32::consts::PI * (PATCH_RADIUS * PATCH_RADIUS) as f32);
+        let world = 2026;
+        let reach = 2;
+        let mut patches = 0;
+        for cx in -reach..=reach {
+            for cy in -reach..=reach {
+                patches += chunk_patches(world, IVec2::new(cx, cy)).len();
+            }
+        }
+        let across = ((2 * reach + 1) * CHUNK) as f32;
+        let density = patches as f32 / (across * across);
+        assert!(
+            density > rings_had * 0.5 && density < rings_had * 2.0,
+            "the rings ran at {rings_had} patches a cell and the chunks run at {density}"
         );
     }
 }

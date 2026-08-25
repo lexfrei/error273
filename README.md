@@ -144,7 +144,9 @@ Sleeping under a roof cuts the bleed of body heat by 30%. It is shelter, not a s
 
 ### Hauling
 
-Eight treelines of 80 units and four hunting grounds of 90 stand on the rim, a thousand in all when they are full. They are not a fixed store: they grow back towards those caps in every season but winter, which is what makes the year rather than the map decide how long a colony lasts.
+The world has no edge. It is generated in squares of sixty-four cells, each one worked out from the world seed and its own coordinates alone, so a square can be asked for in any order and the same world comes back. Treelines and hunting grounds are scattered through it at about the density the old founding rings ran at, so the ground around the hearth holds what it always did. They are not a fixed store either: they grow back towards their own caps in every season but winter, which is what makes the year rather than the map decide how long a colony lasts.
+
+What is further out is worth more. A patch's cap is flat out to the old rim and rises past it, until about a hundred and eighty cells out where it stops, so a longer walk buys a bigger load -- and the walk itself costs warmth, which is the other half of that bargain.
 
 A citizen picks which of the two to fetch by comparing each store against what the colony wants to hold per head, and keeps to that choice for the whole trip. They only change their mind when the other store has fallen a clear margin behind, because a round trip takes thirty-odd hours and a workforce that turns around every time a number crosses its target arrives too late in both directions. That margin is counted in hauls rather than units, so it widens as huts make each trip of game worth more: the slack a store gets is always about the same number of trips. The comparison is also made against what each store will hold once everyone already fetching that kind gets home, not against what is in it now, so a shortage pulls over as many haulers as it needs and no more.
 
