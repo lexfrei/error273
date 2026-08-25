@@ -158,7 +158,7 @@ Children are mouths, not hands. They answer their own needs -- they eat, they sl
 
 ### Growing
 
-Each couple gets one roll every eight hours at a chance that adds up to a set probability over a season, scaled by how many beds are standing empty, and only while the colony is not already carrying its share of children who cannot yet work. A colony with room grows; a full one tails off rather than stopping dead, which is the point: births gated on a bed arrive as a cohort, and a cohort of births is a cohort of deaths a lifetime later. A colony that is cold, worn out, hungry, or short of fuel or food has no children at all.
+Each couple gets one roll every eight hours at a chance that adds up to a set probability over a season, scaled by how many beds are standing empty, and only while the colony is not already carrying its share of children who cannot yet work. A colony with room grows; a full one tails off rather than stopping dead, which is the point: births gated on a bed arrive as a cohort, and a cohort of births is a cohort of deaths a lifetime later. A colony that is cold, worn out, hungry, or short of fuel or food has no children at all, and neither does one whose stores are sliding rather than holding, nor one that could not fetch enough for another mouth with a winter's margin left over. Stores say what has been fetched; only the last of those asks whether anyone is left to keep fetching it, which is how a colony can starve with its treelines untouched.
 
 That is the whole tension: the same wood either keeps the square warm, or becomes the roof that lets the colony grow into needing more of it.
 

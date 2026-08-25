@@ -153,6 +153,12 @@ pub const UPGRADE_HEAT: f32 = 18.0;
 pub const BUILDING_COUNT: usize = 3;
 pub const CARGO_COUNT: usize = 2;
 pub const SEASON_DAYS: usize = DAYS_PER_SEASON as usize;
+// How much more than it spends a colony must be able to fetch before it takes
+// on another mouth. The rate it is judged on is a season's average, and the
+// season that binds is the one that puts nothing back, so this margin is the
+// correction for measuring on the average -- the standard trap in a
+// carrying-capacity estimate -- rather than a fudge factor.
+pub const WINTER_MARGIN: f32 = 0.25;
 
 // Lifecycle. Nobody dies on a birthday: hardiness holds until frailty sets in,
 // then falls away towards a span of their own, and a cold night rolls against
@@ -446,6 +452,15 @@ pub struct Council<'w> {
     pub construction: ResMut<'w, Construction>,
     pub ballot: ResMut<'w, Ballot>,
     pub mayor: Res<'w, Mayor>,
+}
+
+/// What the colony has been measuring about itself: what it holds, what it has
+/// been fetching, and what it has put up.
+#[derive(SystemParam)]
+pub struct Ledger<'w> {
+    pub trend: Res<'w, Trend>,
+    pub flow: Res<'w, Flow>,
+    pub built: Res<'w, Built>,
 }
 
 /// What the world outside is doing, for the systems that only read it.
@@ -1128,6 +1143,67 @@ pub fn colony_thrives(shares: [f32; NEED_COUNT], fuel: u32, food: u32, populatio
         && stock_share(food, FOOD_PER_CITIZEN, population) >= 1.0
 }
 
+/// What the colony spends every tick at a given size, straight out of the
+/// constants that do the spending: the fire's draw, and what every mouth eats.
+/// Fuel and food are added as plain units of fetched stuff, which is what the
+/// haulers' capacity is measured in too, so the comparison holds even though
+/// the two are not interchangeable.
+pub fn demand_per_tick(population: usize, boilers: usize) -> f32 {
+    let fire = burn_amount(population, boilers) as f32 / BURN_EVERY as f32;
+    let rules = NeedKind::Food.rules();
+    let between_meals = (rules.high - rules.low) / rules.decay;
+    let mouths = population as f32 * FOOD_PER_MEAL as f32 / between_meals;
+    fire + mouths
+}
+
+/// Whether the colony could still feed and warm itself with one more mouth in
+/// it, with a winter's margin left over. Stores say what has been fetched; this
+/// asks whether anyone is left to keep fetching it, before the answer is no.
+pub fn can_afford_a_mouth(hands: usize, per_hand: f32, population: usize, boilers: usize) -> bool {
+    let supply = hands as f32 * per_hand;
+    supply >= demand_per_tick(population + 1, boilers) * (1.0 + WINTER_MARGIN)
+}
+
+/// What the colony has actually been fetching, counted rather than assumed: one
+/// reading a day of what came in and how many hands brought it.
+#[derive(Resource, Default)]
+pub struct Flow {
+    today: u32,
+    hauled: [u32; SEASON_DAYS],
+    hands: [u32; SEASON_DAYS],
+    next: usize,
+    days: usize,
+}
+
+impl Flow {
+    pub fn delivered(&mut self, units: u32) {
+        self.today = self.today.saturating_add(units);
+    }
+
+    pub fn close_the_day(&mut self, hands: usize) {
+        self.hauled[self.next] = self.today;
+        self.hands[self.next] = hands as u32;
+        self.today = 0;
+        self.next = (self.next + 1) % SEASON_DAYS;
+        self.days = self.days.saturating_add(1);
+    }
+
+    /// Units one hauler brings in per tick, over the days on record. `None`
+    /// until a day has closed and somebody has actually hauled.
+    pub fn per_hand(&self) -> Option<f32> {
+        let days = self.days.min(SEASON_DAYS);
+        if days == 0 {
+            return None;
+        }
+        let hauled: u32 = self.hauled[..days].iter().sum();
+        let hands: u32 = self.hands[..days].iter().sum();
+        if hands == 0 {
+            return None;
+        }
+        Some(hauled as f32 / (hands as f32 * ticks_per_day() as f32))
+    }
+}
+
 /// What the colony held per head on each of the last season's days. Stocks say
 /// how much has been fetched; only a trend says whether anyone can keep
 /// fetching it, and a colony can starve with every store at its cap.
@@ -1294,6 +1370,7 @@ pub fn record_trend(
     stores: Stores,
     citizens: Query<&Citizen>,
     mut trend: ResMut<Trend>,
+    mut flow: ResMut<Flow>,
 ) {
     if !tick.0.is_multiple_of(ticks_per_day()) {
         return;
@@ -1303,6 +1380,7 @@ pub fn record_trend(
         stock_share(stores.generator.fuel, FUEL_PER_CITIZEN, population),
         stock_share(stores.granary.food, FOOD_PER_CITIZEN, population),
     ]);
+    flow.close_the_day(citizens.iter().filter(|c| is_adult(c.age)).count());
 }
 
 pub fn count_buildings(mut built: ResMut<Built>, structures: Query<&Structure>) {
@@ -1374,7 +1452,7 @@ pub fn colony_growth(
     tick: Res<Tick>,
     mut lineage: ResMut<Lineage>,
     stores: Stores,
-    trend: Res<Trend>,
+    ledger: Ledger,
     houses: Query<(&Pos, &Structure)>,
     citizens: Query<&Citizen>,
 ) {
@@ -1392,7 +1470,19 @@ pub fn colony_growth(
         stock_share(fuel, FUEL_PER_CITIZEN, people.len()),
         stock_share(food, FOOD_PER_CITIZEN, people.len()),
     ];
-    if !stores_are_holding(holding, trend.a_season_ago()) {
+    if !stores_are_holding(holding, ledger.trend.a_season_ago()) {
+        return;
+    }
+    // And whether there would be hands enough for one more, which no store can
+    // say: a colony can sit on full stores it has nobody left to refill.
+    if let Some(per_hand) = ledger.flow.per_hand()
+        && !can_afford_a_mouth(
+            citizens.iter().filter(|c| is_adult(c.age)).count(),
+            per_hand,
+            people.len(),
+            ledger.built.of(Building::GeneratorUpgrade),
+        )
+    {
         return;
     }
     let sites: Vec<IVec2> = houses
@@ -1447,6 +1537,7 @@ pub fn citizen_ai(
     tick: Res<Tick>,
     air: Res<Air>,
     built: Res<Built>,
+    mut flow: ResMut<Flow>,
     mut colony: Colony,
     mut citizens: Query<(Entity, &mut Pos, &mut Citizen)>,
 ) {
@@ -1522,6 +1613,10 @@ pub fn citizen_ai(
                         colony.granary.food += food_yield(built.of(Building::HuntersHut))
                     }
                 }
+                flow.delivered(match cargo {
+                    Cargo::Wood => 1,
+                    Cargo::Food => food_yield(built.of(Building::HuntersHut)),
+                });
                 citizen.carrying = None;
                 let next = haul_choice(citizen.hauling, supply);
                 if next != citizen.hauling {
@@ -3381,5 +3476,92 @@ mod tests {
         }
         assert_eq!(needs.detour_burden(), 0.0);
         assert_eq!(vote_of(&needs), None);
+    }
+
+    #[test]
+    fn a_bigger_colony_spends_more_every_tick() {
+        assert!(demand_per_tick(60, 0) > demand_per_tick(30, 0));
+        assert!(
+            demand_per_tick(30, 1) > demand_per_tick(30, 0),
+            "a boiler eats too"
+        );
+        assert!(
+            demand_per_tick(0, 0) > 0.0,
+            "the fire burns for an empty colony"
+        );
+    }
+
+    #[test]
+    fn a_colony_that_cannot_fetch_what_it_spends_takes_on_nobody() {
+        let population = 40;
+        let barely = demand_per_tick(population + 1, 0) / 30.0;
+        assert!(
+            !can_afford_a_mouth(30, barely, population, 0),
+            "breaking even is not enough to carry a winter"
+        );
+        assert!(can_afford_a_mouth(
+            30,
+            barely * (1.0 + WINTER_MARGIN) * 1.01,
+            population,
+            0
+        ));
+    }
+
+    #[test]
+    fn more_hands_buy_more_mouths() {
+        let per_hand = 0.03;
+        assert!(can_afford_a_mouth(60, per_hand, 20, 0));
+        assert!(!can_afford_a_mouth(5, per_hand, 20, 0));
+    }
+
+    #[test]
+    fn the_flow_has_nothing_to_report_until_a_day_has_closed() {
+        let mut flow = Flow::default();
+        flow.delivered(10);
+        assert_eq!(flow.per_hand(), None, "a day still open says nothing");
+        flow.close_the_day(0);
+        assert_eq!(
+            flow.per_hand(),
+            None,
+            "and neither does a day with no hands"
+        );
+        flow.delivered(24);
+        flow.close_the_day(1);
+        assert!(flow.per_hand().is_some());
+    }
+
+    #[test]
+    fn one_hauler_bringing_a_day_of_units_reads_as_one_a_tick() {
+        let mut flow = Flow::default();
+        flow.delivered(ticks_per_day() as u32);
+        flow.close_the_day(1);
+        assert_eq!(flow.per_hand(), Some(1.0));
+    }
+
+    #[test]
+    fn the_flow_averages_over_the_days_it_holds() {
+        let mut flow = Flow::default();
+        for _ in 0..SEASON_DAYS * 2 {
+            flow.delivered(ticks_per_day() as u32 * 2);
+            flow.close_the_day(2);
+        }
+        assert_eq!(flow.per_hand(), Some(1.0), "two hands, twice the units");
+    }
+
+    #[test]
+    fn the_colony_that_crashed_would_have_stopped_taking_on_mouths() {
+        // From the run that died in autumn of year one: thirty hands fetching
+        // about nine hundredths of a unit a tick between them, at the forty
+        // mouths it had reached by the time the cold caught it.
+        let hands = 30;
+        let per_hand = 0.9 / hands as f32;
+        assert!(
+            !can_afford_a_mouth(hands, per_hand, 40, 0),
+            "thirty pairs of hands cannot carry a forty-first mouth through a winter"
+        );
+        assert!(
+            can_afford_a_mouth(hands, per_hand, 30, 0),
+            "but the colony it started as was well within itself"
+        );
     }
 }
