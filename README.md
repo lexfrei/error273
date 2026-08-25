@@ -61,6 +61,36 @@ under 15   2  grown  20  over 40  10  couples  12  raised 0.52/0.46/0.53
 eldest #30  52y  str fair   wit good   hard fair    watched  11d (a guess)
 ```
 
+That is the whole frame: forty-nine cells across, the hearth in the middle, and world in every direction past its edges. The glyphs are the window's, listed below; the five lines under the map are exactly what the headless build prints.
+
+| Symbol | Meaning |
+| --- | --- |
+| `#` | the generator, at the centre of the map |
+| `H` | a house, sleeping up to three citizens |
+| `V` | a hunter's hut |
+| `B` | a boiler, raising what the generator can burn to |
+| `+` | the plot the current project is going up on |
+| `T` | a treeline with wood still standing |
+| `t` | a treeline cut out |
+| `Y` | a hunting ground with game left |
+| `y` | a hunting ground hunted out |
+| `@` | a citizen, empty-handed |
+| `W` | a citizen carrying wood |
+| `F` | a citizen carrying game |
+| `z` | a citizen asleep at home |
+| `.` | open ground |
+
+Five lines sit under the map. The first is the tick counter, the date it works out to, and the air outside the fire's reach. The second is the living population, how many of them are working past the edge of the frame, and the four quantities that decide the run: fuel in the generator, food in the granary, and the wood and game still standing on the near ground -- the twenty-four cells around the hearth the colony lives off. A total over the whole world would only report how far the colony has wandered, so those two columns are the ground the colony works rather than the ground that exists. The third counts what has been built, names the project in progress with how much timber it has swallowed so far, and gives the last ballot as votes for house, hut and boiler in that order. The fourth is the age pyramid -- children, grown citizens, the frail -- how many couples the colony has, and the middle of the colony for each of the three stats. That last is an aggregate and not a reveal: what any one citizen is stays hidden.
+
+## Running it
+
+Needs a stable Rust toolchain.
+
+```bash
+rustup toolchain install stable
+cargo run
+```
+
 That opens a window and draws the map on square cells, twelve and a half ticks a second, with the status lines under it. A terminal character box is about twice as tall as it is wide, which made a step sideways read as shorter than a step down; on square cells distances read true. Every cell is tinted by how warm it is, so the fire's reach is a thing you can watch shrink through autumn. It exits on its own once everyone is dead; Ctrl+C ends it early.
 
 ### The headless instrument
@@ -95,7 +125,7 @@ The simulation's decisions are pushed into pure functions so they can be checked
 
 ## What the simulation does
 
-The generator sits at the hearth and everything the colony builds goes up on rings around it. The ground beyond carries the treelines and hunting grounds, and it does not stop. The window is a frame on that world rather than the whole of it: it holds the twenty-four cells around the hearth that a citizen looks for work in, and anyone who goes further is off the frame and counted on the status line instead of drawn.
+The generator sits at the hearth and everything the colony builds goes up on rings around it. The ground beyond carries the treelines and hunting grounds, and it does not stop. The window is a frame on that world rather than the whole of it: it holds the twenty-four cells around the hearth that the colony lives off, and anyone who goes further is off the frame and counted on the status line instead of drawn.
 
 One tick is a game hour, twenty-four hours a day, thirty days a season, four seasons a year. Every rate below is written in those units in the source and converted through the clock, so the real-time tempo and the length of a day are separate knobs.
 
@@ -125,7 +155,7 @@ The world has no edge. It is generated in squares of sixty-four cells, each one 
 
 What is further out is worth more. A patch's cap is flat out to the old rim and rises past it, until about a hundred and eighty cells out where it stops. A trip out there does not bring home more at once, since what a citizen can carry is set by the citizen; it means the ground gives up more before it is bare, and grows back to more.
 
-A citizen looks for work twenty-four cells out and widens that only when there is nothing standing inside it: once to sixty-four cells, then out to where richness stops rising, which is as far as anybody walks. Two things fall out of that. The search meets a few dozen patches instead of a world, which is what keeps the cost of a tick from following the size of the map. And the colony only draws the world it looks at: a square is worked out the first time somebody looks inside it and dropped again once nobody is near, because the seed can always redraw it. What the colony took is the one thing the seed does not know, so every cut is kept apart from the squares and put back on top -- a stripped treeline is still stripped when the colony walks away and comes back.
+A citizen looking for work asks for the nearest patch of the kind they want, and the world answers by opening squares in the order they could possibly hold something close. Each square knows how much of each kind stands in it, so a stripped one is passed over without being looked inside, and a square whose nearest cell is further away than what has already been found is never opened at all. What a search costs is therefore set by how far the answer turns out to be, not by how far a citizen is willing to walk or by how much world exists -- which is what keeps the cost of a tick from following the size of the map. Nobody looks past a hundred and eighty cells, because past there the ground stops getting better for the walk. And the colony only draws the world it looks at: a square is worked out the first time somebody looks inside it and dropped again once nobody is near, because the seed can always redraw it. What the colony took is the one thing the seed does not know, so every cut is kept apart from the squares and put back on top -- a stripped treeline is still stripped when the colony walks away and comes back.
 
 A citizen picks which of the two to fetch by comparing each store against what the colony wants to hold per head, and keeps to that choice for the whole trip. They only change their mind when the other store has fallen a clear margin behind, because a round trip takes thirty-odd hours and a workforce that turns around every time a number crosses its target arrives too late in both directions. That margin is counted in hauls rather than units, so it widens as huts make each trip of game worth more: the slack a store gets is always about the same number of trips. The comparison is also made against what each store will hold once everyone already fetching that kind gets home, not against what is in it now, so a shortage pulls over as many haulers as it needs and no more.
 

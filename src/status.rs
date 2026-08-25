@@ -3,7 +3,7 @@ use bevy::prelude::*;
 
 use crate::sim::{
     ADULT_AGE, BUILDING_COUNT, BUILDINGS, Ballot, Building, CENTER, Calendar, Cargo, Construction,
-    FRAILTY_ONSET, Outside, Patches, Regard, SEARCH_RADII, STAT_COUNT, STATS, Stores, couples,
+    FRAILTY_ONSET, NEAR_GROUND, Outside, Patches, Regard, STAT_COUNT, STATS, Stores, couples,
     is_adult,
 };
 
@@ -21,12 +21,12 @@ pub struct Readings<'w> {
 }
 
 impl Readings<'_> {
-    /// What is standing inside the ring a citizen looks in first. The world has
-    /// no edge, so a total over all of it would only report how far the colony
-    /// has wandered.
+    /// What is standing on the ground the colony lives off. The world has no
+    /// edge, so a total over all of it would only report how far the colony has
+    /// wandered; this is the near ground, which is where the work is.
     pub fn standing(&self, kind: Cargo) -> u32 {
         self.patches
-            .seen(CENTER, SEARCH_RADII[0])
+            .seen(CENTER, NEAR_GROUND)
             .filter(|patch| patch.kind == kind)
             .map(|patch| patch.amount)
             .sum()
