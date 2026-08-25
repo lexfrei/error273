@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 
 use crate::sim::{
-    CENTER, Calendar, Citizen, Construction, Forest, Generator, HOUSE_WOOD_COST, House, Pos, R,
-    Tick,
+    CENTER, Calendar, Cargo, Citizen, Construction, HOUSE_WOOD_COST, House, NeedKind, Pos, R,
+    Stores, Tick,
 };
 
 pub fn clear_screen() {
@@ -12,8 +12,7 @@ pub fn clear_screen() {
 pub fn render(
     tick: Res<Tick>,
     calendar: Res<Calendar>,
-    generator: Res<Generator>,
-    forest: Res<Forest>,
+    stores: Stores,
     construction: Res<Construction>,
     houses: Query<&Pos, With<House>>,
     citizens: Query<(&Pos, &Citizen)>,
@@ -28,8 +27,8 @@ pub fn render(
             }
         }
     }
-    for (cell, wood) in &forest.0 {
-        grid[cell.y as usize][cell.x as usize] = if *wood > 0 { 'T' } else { 't' };
+    for patch in &stores.patches.0 {
+        grid[patch.pos.y as usize][patch.pos.x as usize] = patch_glyph(patch.kind, patch.amount);
     }
     for pos in &houses {
         grid[pos.0.y as usize][pos.0.x as usize] = 'H';
@@ -43,7 +42,15 @@ pub fn render(
     grid[CENTER.y as usize][CENTER.x as usize] = '#';
 
     let alive = citizens.iter().count();
-    let wood_left: u32 = forest.0.iter().map(|(_, w)| w).sum();
+    let standing = |kind: Cargo| -> u32 {
+        stores
+            .patches
+            .0
+            .iter()
+            .filter(|patch| patch.kind == kind)
+            .map(|patch| patch.amount)
+            .sum()
+    };
     let mut out = String::from("\x1B[H");
     for row in &grid {
         out.push_str(&row.iter().collect::<String>());
@@ -62,27 +69,37 @@ pub fn render(
         calendar.hour
     ));
     out.push_str(&format!(
-        "pop {:3}  houses {:3}  build {}  fuel {:4}  forest {:4}\n",
+        "pop {:3}  houses {:3}  build {}  fuel {:4}  food {:4}  wood {:4}  game {:4}\n",
         alive,
         houses.iter().count(),
         site,
-        generator.fuel,
-        wood_left
+        stores.generator.fuel,
+        stores.granary.food,
+        standing(Cargo::Wood),
+        standing(Cargo::Food)
     ));
     print!("{out}");
 
     if alive == 0 {
-        println!("Everyone froze. The city is silent.");
+        println!("The colony is silent.");
         std::process::exit(0);
     }
 }
 
+fn patch_glyph(kind: Cargo, amount: u32) -> char {
+    match (kind, amount > 0) {
+        (Cargo::Wood, true) => 'T',
+        (Cargo::Wood, false) => 't',
+        (Cargo::Food, true) => 'Y',
+        (Cargo::Food, false) => 'y',
+    }
+}
+
 fn citizen_glyph(citizen: &Citizen, pos: IVec2) -> char {
-    if citizen.carrying {
-        'W'
-    } else if citizen.resting && pos == citizen.home {
-        'z'
-    } else {
-        '@'
+    match citizen.carrying {
+        Some(Cargo::Wood) => 'W',
+        Some(Cargo::Food) => 'F',
+        None if citizen.needs.get(NeedKind::Rest).pressing && pos == citizen.home => 'z',
+        None => '@',
     }
 }
