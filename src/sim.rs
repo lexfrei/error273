@@ -3156,17 +3156,19 @@ pub fn citizen_ai(
         .map(|(pos, _)| pos.0)
         .collect();
     hungry.sort_by_key(|post| ((post - CENTER).abs().max_element(), post.x, post.y));
-    let mut carriers: Vec<(Entity, IVec2)> = citizens
+    // The seed breaks the last tie, because two haulers can stand on one cell
+    // and the order a query hands them back is not a thing the colony knows.
+    let mut carriers: Vec<(Entity, IVec2, u64)> = citizens
         .iter()
         .filter(|(_, _, citizen)| citizen.carrying == Some(Cargo::Wood))
-        .map(|(entity, pos, _)| (entity, pos.0))
+        .map(|(entity, pos, citizen)| (entity, pos.0, citizen.seed))
         .collect();
     let mut claims: Vec<(Entity, IVec2)> = Vec::new();
     for post in hungry {
         let Some(index) = carriers
             .iter()
             .enumerate()
-            .min_by_key(|(_, (_, at))| ((post - *at).abs().max_element(), at.x, at.y))
+            .min_by_key(|(_, (_, at, seed))| ((post - *at).abs().max_element(), *seed))
             .map(|(index, _)| index)
         else {
             break;
