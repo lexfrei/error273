@@ -1437,7 +1437,7 @@ mod tests {
     }
 
     #[test]
-    fn the_band_is_one_haul_wide_relative_to_the_workforce() {
+    fn the_band_scales_with_the_workforce_and_never_degenerates() {
         assert!(
             haul_switch_margin(60, 0) < haul_switch_margin(30, 0),
             "with twice the haulers one trip moves the store half as far"
