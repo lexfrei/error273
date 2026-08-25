@@ -152,6 +152,7 @@ pub const BOILER_WOOD_COST: u32 = 24;
 pub const UPGRADE_HEAT: f32 = 18.0;
 pub const BUILDING_COUNT: usize = 3;
 pub const CARGO_COUNT: usize = 2;
+pub const SEASON_DAYS: usize = DAYS_PER_SEASON as usize;
 
 // Lifecycle. Nobody dies on a birthday: hardiness holds until frailty sets in,
 // then falls away towards a span of their own, and a cold night rolls against
@@ -1087,6 +1088,57 @@ pub fn colony_thrives(shares: [f32; NEED_COUNT], fuel: u32, food: u32, populatio
         && stock_share(food, FOOD_PER_CITIZEN, population) >= 1.0
 }
 
+/// What the colony held per head on each of the last season's days. Stocks say
+/// how much has been fetched; only a trend says whether anyone can keep
+/// fetching it, and a colony can starve with every store at its cap.
+#[derive(Resource)]
+pub struct Trend {
+    history: [[f32; CARGO_COUNT]; SEASON_DAYS],
+    next: usize,
+    days: usize,
+}
+
+impl Default for Trend {
+    fn default() -> Self {
+        Trend {
+            history: [[0.0; CARGO_COUNT]; SEASON_DAYS],
+            next: 0,
+            days: 0,
+        }
+    }
+}
+
+impl Trend {
+    pub fn record(&mut self, shares: [f32; CARGO_COUNT]) {
+        self.history[self.next] = shares;
+        self.next = (self.next + 1) % SEASON_DAYS;
+        self.days = self.days.saturating_add(1);
+    }
+
+    /// What was held a season back, once there has been a season to look back
+    /// on. A colony in its first season has nothing to compare against.
+    pub fn a_season_ago(&self) -> Option<[f32; CARGO_COUNT]> {
+        (self.days >= SEASON_DAYS).then(|| self.history[self.next])
+    }
+}
+
+/// Whether a store is holding up: no worse per head than it was a season ago,
+/// or still at what the colony wants per head, which cannot rise further and so
+/// must not be read as falling.
+pub fn store_is_holding(now: f32, a_season_ago: f32) -> bool {
+    now >= a_season_ago || now >= 1.0
+}
+
+pub fn stores_are_holding(now: [f32; CARGO_COUNT], then: Option<[f32; CARGO_COUNT]>) -> bool {
+    match then {
+        None => true,
+        Some(then) => now
+            .iter()
+            .zip(then)
+            .all(|(now, then)| store_is_holding(*now, then)),
+    }
+}
+
 /// Whether the colony has hands to spare for another mouth. Stores say what it
 /// has fetched, not whether anyone is left to fetch more, and a child is a
 /// mouth for years before it is a pair of hands.
@@ -1196,6 +1248,23 @@ pub fn regrow_patches(tick: Res<Tick>, calendar: Res<Calendar>, mut patches: Res
     }
 }
 
+/// One reading a day of what the colony holds per head, kept a season deep.
+pub fn record_trend(
+    tick: Res<Tick>,
+    stores: Stores,
+    citizens: Query<&Citizen>,
+    mut trend: ResMut<Trend>,
+) {
+    if !tick.0.is_multiple_of(ticks_per_day()) {
+        return;
+    }
+    let population = citizens.iter().count();
+    trend.record([
+        stock_share(stores.generator.fuel, FUEL_PER_CITIZEN, population),
+        stock_share(stores.granary.food, FOOD_PER_CITIZEN, population),
+    ]);
+}
+
 pub fn count_buildings(mut built: ResMut<Built>, structures: Query<&Structure>) {
     let mut counts = [0usize; BUILDING_COUNT];
     for structure in &structures {
@@ -1264,8 +1333,8 @@ pub fn colony_growth(
     mut commands: Commands,
     tick: Res<Tick>,
     mut lineage: ResMut<Lineage>,
-    generator: Res<Generator>,
-    granary: Res<Granary>,
+    stores: Stores,
+    trend: Res<Trend>,
     houses: Query<(&Pos, &Structure)>,
     citizens: Query<&Citizen>,
 ) {
@@ -1273,12 +1342,17 @@ pub fn colony_growth(
         return;
     }
     let people: Vec<Needs> = citizens.iter().map(|citizen| citizen.needs).collect();
-    if !colony_thrives(
-        met_shares(&people),
-        generator.fuel,
-        granary.food,
-        people.len(),
-    ) {
+    let fuel = stores.generator.fuel;
+    let food = stores.granary.food;
+    if !colony_thrives(met_shares(&people), fuel, food, people.len()) {
+        return;
+    }
+    // Full stores say nothing about whether anyone can keep them full.
+    let holding = [
+        stock_share(fuel, FUEL_PER_CITIZEN, people.len()),
+        stock_share(food, FOOD_PER_CITIZEN, people.len()),
+    ];
+    if !stores_are_holding(holding, trend.a_season_ago()) {
         return;
     }
     let sites: Vec<IVec2> = houses
@@ -3166,5 +3240,87 @@ mod tests {
             false,
         );
         assert_eq!(vote_of(&needs), building_for(NeedKind::Rest));
+    }
+
+    #[test]
+    fn a_store_that_is_rising_or_flat_is_holding() {
+        assert!(store_is_holding(1.4, 1.2), "rising");
+        assert!(store_is_holding(1.2, 1.2), "flat");
+        assert!(store_is_holding(0.5, 0.5), "flat and thin is still flat");
+    }
+
+    #[test]
+    fn a_store_being_eaten_into_is_not_holding_unless_it_is_still_full() {
+        assert!(
+            !store_is_holding(0.8, 1.4),
+            "falling and already below what the colony wants per head"
+        );
+        assert!(
+            store_is_holding(1.05, 1.4),
+            "falling from a great height but still at target is not a shortage"
+        );
+    }
+
+    #[test]
+    fn a_colony_with_no_season_behind_it_is_free_to_grow() {
+        assert!(
+            stores_are_holding([0.1; CARGO_COUNT], None),
+            "a colony in its first season has nothing to compare against"
+        );
+    }
+
+    #[test]
+    fn one_store_failing_is_enough_to_close_the_gate() {
+        let then = Some([1.5, 1.5]);
+        assert!(stores_are_holding([1.6, 1.6], then));
+        assert!(
+            !stores_are_holding([0.4, 1.6], then),
+            "wood alone can close it"
+        );
+        assert!(!stores_are_holding([1.6, 0.4], then), "and so can game");
+    }
+
+    #[test]
+    fn the_trend_has_nothing_to_say_until_a_season_has_gone_by() {
+        let mut trend = Trend::default();
+        for day in 0..SEASON_DAYS - 1 {
+            assert_eq!(trend.a_season_ago(), None, "only {day} days in");
+            trend.record([1.0; CARGO_COUNT]);
+        }
+        trend.record([2.0; CARGO_COUNT]);
+        assert_eq!(
+            trend.a_season_ago(),
+            Some([1.0; CARGO_COUNT]),
+            "and then it reports the day a season back, not the latest one"
+        );
+    }
+
+    #[test]
+    fn the_trend_ring_keeps_walking_forward() {
+        let mut trend = Trend::default();
+        for day in 0..SEASON_DAYS * 3 {
+            trend.record([day as f32; CARGO_COUNT]);
+        }
+        let oldest = (SEASON_DAYS * 3 - SEASON_DAYS) as f32;
+        assert_eq!(trend.a_season_ago(), Some([oldest; CARGO_COUNT]));
+    }
+
+    #[test]
+    fn the_colony_that_died_in_autumn_would_have_stopped_breeding_first() {
+        // Straight off the run that died in year one: a season before the
+        // collapse it held 64 fuel over 35 people, and by the time autumn bit
+        // it held 44 over 40.
+        let comfortable = [
+            stock_share(64, FUEL_PER_CITIZEN, 35),
+            stock_share(31, FOOD_PER_CITIZEN, 35),
+        ];
+        let sliding = [
+            stock_share(44, FUEL_PER_CITIZEN, 40),
+            stock_share(31, FOOD_PER_CITIZEN, 40),
+        ];
+        assert!(
+            !stores_are_holding(sliding, Some(comfortable)),
+            "a colony whose fuel per head fell through its target must stop growing"
+        );
     }
 }

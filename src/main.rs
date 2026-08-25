@@ -20,7 +20,7 @@ use bevy::prelude::Update as SimSchedule;
 
 use sim::{
     Air, Ballot, Built, Calendar, Construction, Generator, Granary, Lineage, Mayor, START_FOOD,
-    START_FUEL, Tick,
+    START_FUEL, Tick, Trend,
 };
 
 fn main() {
@@ -37,6 +37,7 @@ fn main() {
         .init_resource::<Ballot>()
         .init_resource::<Lineage>()
         .init_resource::<Air>()
+        .init_resource::<Trend>()
         .insert_resource(Generator { fuel: START_FUEL })
         .insert_resource(Granary { food: START_FOOD })
         .add_systems(Startup, sim::setup)
@@ -49,6 +50,7 @@ fn main() {
                 sim::count_buildings,
                 sim::advance_weather,
                 sim::regrow_patches,
+                sim::record_trend,
                 sim::construction,
                 sim::citizen_ai,
                 sim::colony_growth,
