@@ -20,6 +20,10 @@ pub const fn ticks_per_year() -> u64 {
     ticks_per_season() * SEASONS_PER_YEAR
 }
 
+pub const fn days_per_year() -> u64 {
+    DAYS_PER_SEASON * SEASONS_PER_YEAR
+}
+
 /// Simulation rates are written in game-hour or game-day terms and converted
 /// here, so no rate constant is a bare per-tick number that silently rescales
 /// when the length of a day changes.
@@ -93,7 +97,17 @@ pub fn calendar_at(tick: u64) -> Calendar {
 
 pub const R: i32 = 18;
 pub const CENTER: IVec2 = IVec2::new(R, R);
-pub const AMBIENT: f32 = -30.0;
+// The air over the year: a mean with a swing either side of it, mildest in the
+// middle of summer and harshest in the middle of winter.
+pub const AMBIENT_MEAN: f32 = -26.0;
+pub const AMBIENT_SWING: f32 = 14.0;
+// A colony gets one winter to learn on. The ramp is on the cold half only, so
+// summers are the same every year.
+pub const SEVERITY_FIRST: f32 = 0.55;
+pub const SEVERITY_FULL_YEAR: u64 = 3;
+// What a patch puts back on a growing day. Nothing grows in winter.
+pub const WOOD_REGROWTH_PER_DAY: u32 = 6;
+pub const FOOD_REGROWTH_PER_DAY: u32 = 3;
 pub const GENERATOR_HEAT: f32 = 66.0;
 pub const HEAT_FALLOFF: f32 = 3.0;
 // Fuel stocked above this level cannot make the fire any hotter; below it the
@@ -105,9 +119,9 @@ pub const CITIZENS: usize = 30;
 // Harvest patches sit on the rim, out past the last buildable ring of plots.
 pub const PATCH_RADIUS: i32 = R - 1;
 pub const WOOD_CELLS: usize = 8;
-pub const WOOD_PER_CELL: u32 = 50;
+pub const WOOD_PER_CELL: u32 = 80;
 pub const FOOD_CELLS: usize = 4;
-pub const FOOD_PER_CELL: u32 = 60;
+pub const FOOD_PER_CELL: u32 = 90;
 
 // What the colony starts with. These belong beside the rates they are tuned
 // against, not in the app wiring.
@@ -160,15 +174,22 @@ pub const COLD_SNAP_SALT: u64 = 0x22;
 pub const BIRTH_SALT: u64 = 0x33;
 // What the colony keeps behind the fire before it will break ground on a
 // project, so building never comes straight out of the next few nights.
-pub const BUILD_RESERVE: u32 = 50;
+// What the colony wants to be holding per head before it will break ground,
+// and the fact that it will not start anything in a season that grows nothing
+// back.
+pub const BUILD_RESERVE_SHARE: f32 = 1.5;
+// Past a handful of huts the grounds are as well worked as they are going to
+// be; more sheds do not dress a carcass any faster.
+pub const USEFUL_HUTS: usize = 3;
+// How much of the colony can be mouths that do not yet work. A stock of food
+// says nothing about whether there are hands to fetch the next one.
+pub const MAX_DEPENDENT_SHARE: f32 = 0.12;
 // Hysteresis on the colony's wood policy: only a comfortable stock is diverted
 // to a building site, and a project is not abandoned the moment it dips.
 pub const FUEL_SPARE_HIGH: u32 = 58;
 pub const FUEL_SPARE_LOW: u32 = 30;
 
 pub const BIRTH_EVERY: u64 = 8 * TICKS_PER_HOUR;
-pub const BIRTH_FUEL_MIN: u32 = 40;
-pub const BIRTH_FOOD_MIN: u32 = 20;
 pub const GROWTH_SHARE: f32 = 0.6;
 // What the colony aims to hold per citizen, and so which stockpile a hauler
 // judges to be the shorter one.
@@ -177,6 +198,10 @@ pub const FOOD_PER_CITIZEN: f32 = 0.6;
 // Deadband on the haul decision, counted in hauls rather than units: how many
 // trips of slack the other store gets before a hauler changes what they fetch.
 pub const HAUL_SWITCH_HAULS: f32 = 4.0;
+// ...but never wider than this much of a store's target. A band wider than the
+// range it damps stops being a deadband and becomes a latch, and a latched
+// hauler will walk past a full hunting ground while the granary empties.
+pub const HAUL_SWITCH_MAX: f32 = 0.35;
 // Every block of citizens the generator has to warm costs another log per cycle,
 // so growth is paid for twice: once in timber, then forever in fuel.
 pub const POP_PER_EXTRA_BURN: usize = 20;
@@ -355,6 +380,22 @@ pub struct Generator {
     pub fuel: u32,
 }
 
+/// What the colony decides with: the project in hand, the last ballot, and the
+/// office's thumb on the scale.
+#[derive(SystemParam)]
+pub struct Council<'w> {
+    pub construction: ResMut<'w, Construction>,
+    pub ballot: ResMut<'w, Ballot>,
+    pub mayor: Res<'w, Mayor>,
+}
+
+/// What the world outside is doing, for the systems that only read it.
+#[derive(SystemParam)]
+pub struct Outside<'w> {
+    pub calendar: Res<'w, Calendar>,
+    pub air: Res<'w, Air>,
+}
+
 /// Everything the colony's own work touches, gathered into one borrow so the
 /// systems that change it keep a readable signature.
 #[derive(SystemParam)]
@@ -384,6 +425,8 @@ pub struct Patch {
     pub pos: IVec2,
     pub kind: Cargo,
     pub amount: u32,
+    /// What this patch grows back towards, and never past.
+    pub cap: u32,
 }
 
 #[derive(Resource)]
@@ -606,23 +649,77 @@ pub fn ring_pos(radius: f32, angle: f32) -> IVec2 {
         )
 }
 
+/// How hard the cold bites in a given year. The first winter is scaled back so
+/// a colony gets one to learn on, reaching full depth by `SEVERITY_FULL_YEAR`.
+pub fn severity(year: u64) -> f32 {
+    let years_in = year.saturating_sub(1) as f32;
+    let ramp = years_in / (SEVERITY_FULL_YEAR.saturating_sub(1).max(1)) as f32;
+    (SEVERITY_FIRST + ramp * (1.0 - SEVERITY_FIRST)).min(1.0)
+}
+
+/// The air outside the generator's reach on the day a tick falls in. A cosine
+/// through the year, so the drift from one day to the next is smooth and the
+/// extremes land mid-season rather than on a boundary.
+pub fn ambient_at(tick: u64) -> f32 {
+    let day = tick / ticks_per_day() % days_per_year();
+    let year = tick / ticks_per_year() + 1;
+    let midsummer = days_per_year() / 4 + days_per_year() / 8;
+    let phase = (day as f32 - midsummer as f32) / days_per_year() as f32 * std::f32::consts::TAU;
+    let through_the_year = phase.cos();
+    let swing = if through_the_year < 0.0 {
+        AMBIENT_SWING * severity(year)
+    } else {
+        AMBIENT_SWING
+    };
+    AMBIENT_MEAN + swing * through_the_year
+}
+
+pub fn is_growing_season(season: Season) -> bool {
+    !matches!(season, Season::Winter)
+}
+
+pub fn regrowth_per_day(kind: Cargo) -> u32 {
+    match kind {
+        Cargo::Wood => WOOD_REGROWTH_PER_DAY,
+        Cargo::Food => FOOD_REGROWTH_PER_DAY,
+    }
+}
+
+/// What a patch holds after a day of growing back, never past its own cap.
+pub fn regrowth_step(amount: u32, cap: u32, kind: Cargo, growing: bool) -> u32 {
+    if !growing {
+        return amount;
+    }
+    (amount + regrowth_per_day(kind)).min(cap)
+}
+
 pub fn generator_output(fuel: u32, upgrades: usize) -> f32 {
     let ceiling = GENERATOR_HEAT + upgrades as f32 * UPGRADE_HEAT;
     (fuel as f32 / FULL_BURN_FUEL as f32).min(1.0) * ceiling
 }
 
-pub fn heat_at(p: IVec2, output: f32) -> f32 {
-    let d = p.as_vec2().distance(CENTER.as_vec2());
-    (output - d * HEAT_FALLOFF).max(0.0) + AMBIENT
+/// The air the colony is standing in: what the fire is putting out, and how
+/// cold it is outside the fire's reach. The two always travel together.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct Air {
+    pub output: f32,
+    pub ambient: f32,
 }
 
-/// The nearest warmth worth walking to: the generator while it still heats the
-/// square, otherwise the citizen's own roof.
-pub fn warmth_target(output: f32, home: IVec2) -> IVec2 {
-    if heat_at(CENTER, output) > 0.0 {
-        CENTER
-    } else {
-        home
+impl Air {
+    pub fn heat_at(self, p: IVec2) -> f32 {
+        let d = p.as_vec2().distance(CENTER.as_vec2());
+        (self.output - d * HEAT_FALLOFF).max(0.0) + self.ambient
+    }
+
+    /// The nearest warmth worth walking to: the generator while it still heats
+    /// the square, otherwise the citizen's own roof.
+    pub fn warmth_target(self, home: IVec2) -> IVec2 {
+        if self.heat_at(CENTER) > 0.0 {
+            CENTER
+        } else {
+            home
+        }
     }
 }
 
@@ -656,18 +753,18 @@ pub fn choose_duty(needs: &Needs, carrying: Option<Cargo>, grown: bool) -> Duty 
 /// any is left, and `drop_off` is wherever their load is wanted.
 pub fn duty_target(
     duty: Duty,
-    output: f32,
+    air: Air,
     home: IVec2,
     drop_off: IVec2,
     source: Option<IVec2>,
 ) -> IVec2 {
     match duty {
-        Duty::WarmUp => warmth_target(output, home),
+        Duty::WarmUp => air.warmth_target(home),
         Duty::Eat => CENTER,
         Duty::Deliver => drop_off,
         Duty::Rest => home,
         // With the patches stripped there is no work left, only warmth to find.
-        Duty::Gather => source.unwrap_or_else(|| warmth_target(output, home)),
+        Duty::Gather => source.unwrap_or_else(|| air.warmth_target(home)),
     }
 }
 
@@ -683,7 +780,7 @@ pub fn stock_share(stock: u32, per_head: f32, population: usize) -> f32 {
 /// with it would have the workforce overshoot on every correction.
 pub fn haul_switch_margin(population: usize, huts: usize) -> f32 {
     let per_haul = food_yield(huts) as f32 / (population as f32 * FOOD_PER_CITIZEN).max(1.0);
-    HAUL_SWITCH_HAULS * per_haul
+    (HAUL_SWITCH_HAULS * per_haul).min(HAUL_SWITCH_MAX)
 }
 
 /// What a store will hold once everyone already fetching that kind gets home.
@@ -707,6 +804,11 @@ impl Supply {
     /// arrives. Judging on the store alone sends the whole workforce after a
     /// shortage that the first few haulers have already covered, and a round
     /// trip is long enough that nobody finds out until it is too late.
+    /// Whether a store is still short of what the colony wants to hold per head.
+    pub fn wants(&self, cargo: Cargo) -> bool {
+        self.projected_share(cargo) < 1.0
+    }
+
     pub fn projected_share(&self, cargo: Cargo) -> f32 {
         let (stock, per_haul, per_head) = match cargo {
             Cargo::Wood => (self.fuel, 1, FUEL_PER_CITIZEN),
@@ -735,8 +837,13 @@ pub fn haul_choice(current: Cargo, supply: Supply) -> Cargo {
 }
 
 /// The nearest patch a citizen can work: their own kind if any still stands,
-/// otherwise whatever is left, so nobody idles beside a full hunting ground.
-pub fn gather_source(patches: &Patches, want: Cargo, from: IVec2) -> Option<(IVec2, Cargo)> {
+/// otherwise whatever is left, but only if the colony actually wants it.
+pub fn gather_source(
+    patches: &Patches,
+    want: Cargo,
+    from: IVec2,
+    take_other: bool,
+) -> Option<(IVec2, Cargo)> {
     let nearest = |kind: Cargo| {
         patches
             .0
@@ -745,7 +852,13 @@ pub fn gather_source(patches: &Patches, want: Cargo, from: IVec2) -> Option<(IVe
             .min_by_key(|patch| (patch.pos - from).abs().max_element())
             .map(|patch| (patch.pos, patch.kind))
     };
-    nearest(want).or_else(|| nearest(want.other()))
+    match nearest(want) {
+        found @ Some(_) => found,
+        // Falling back on a store the colony already has more than enough of
+        // buys nothing and keeps a citizen out in the cold to do it.
+        None if take_other => nearest(want.other()),
+        None => None,
+    }
 }
 
 pub fn take_from_patch(patches: &mut Patches, pos: IVec2) {
@@ -764,6 +877,7 @@ pub fn patch_sites() -> Vec<Patch> {
                 ),
                 kind,
                 amount,
+                cap: amount,
             })
             .collect::<Vec<Patch>>()
     };
@@ -818,7 +932,7 @@ pub fn burn_amount(population: usize, upgrades: usize) -> u32 {
 /// What one haul of game puts in the granary. Every hut standing means the
 /// carcass comes back dressed rather than dragged whole.
 pub fn food_yield(huts: usize) -> u32 {
-    1 + huts as u32
+    1 + huts.min(USEFUL_HUTS) as u32
 }
 
 pub fn update_diverting(diverting: bool, fuel: u32) -> bool {
@@ -899,9 +1013,11 @@ pub fn takes_a_meal(needs: &Needs, at_granary: bool, food: u32) -> bool {
     needs.get(NeedKind::Food).pressing && at_granary && food >= FOOD_PER_MEAL
 }
 
-/// Whether there is enough fuel behind the fire to break ground on anything.
-pub fn can_afford_project(fuel: u32, diverting: bool) -> bool {
-    diverting && fuel >= BUILD_RESERVE
+/// Whether the colony can break ground on anything: half again what it wants
+/// to hold per head behind the fire, and a season that puts something back.
+/// Building through a winter spends the only buffer there is.
+pub fn can_afford_project(fuel: u32, population: usize, diverting: bool, growing: bool) -> bool {
+    growing && diverting && stock_share(fuel, FUEL_PER_CITIZEN, population) >= BUILD_RESERVE_SHARE
 }
 
 /// Whether a log carried to `drop_off` joins the project rather than the fire.
@@ -932,10 +1048,21 @@ pub fn met_shares(people: &[Needs]) -> [f32; NEED_COUNT] {
     shares
 }
 
-pub fn colony_thrives(shares: [f32; NEED_COUNT], fuel: u32, food: u32) -> bool {
+/// Whether the colony is in any shape to take on another mouth: every need
+/// comfortably met across most of it, and both stores at what it wants to hold
+/// per head. Judging the stores per head rather than against a flat number is
+/// what stops a colony growing straight through its own supply.
+pub fn colony_thrives(shares: [f32; NEED_COUNT], fuel: u32, food: u32, population: usize) -> bool {
     shares.iter().all(|share| *share >= GROWTH_SHARE)
-        && fuel >= BIRTH_FUEL_MIN
-        && food >= BIRTH_FOOD_MIN
+        && stock_share(fuel, FUEL_PER_CITIZEN, population) >= 1.0
+        && stock_share(food, FOOD_PER_CITIZEN, population) >= 1.0
+}
+
+/// Whether the colony has hands to spare for another mouth. Stores say what it
+/// has fetched, not whether anyone is left to fetch more, and a child is a
+/// mouth for years before it is a pair of hands.
+pub fn has_hands_to_spare(children: usize, population: usize) -> bool {
+    population > 0 && (children as f32 / population as f32) <= MAX_DEPENDENT_SHARE
 }
 
 pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
@@ -1015,6 +1142,31 @@ pub fn burn_fuel(
     }
 }
 
+/// The air this tick: what the fire is putting out, and how cold the year has
+/// made everything outside its reach.
+pub fn advance_weather(
+    tick: Res<Tick>,
+    built: Res<Built>,
+    generator: Res<Generator>,
+    mut air: ResMut<Air>,
+) {
+    *air = Air {
+        output: generator_output(generator.fuel, built.of(Building::GeneratorUpgrade)),
+        ambient: ambient_at(tick.0),
+    };
+}
+
+/// A day's growing back, in the seasons that allow it.
+pub fn regrow_patches(tick: Res<Tick>, calendar: Res<Calendar>, mut patches: ResMut<Patches>) {
+    if !tick.0.is_multiple_of(ticks_per_day()) {
+        return;
+    }
+    let growing = is_growing_season(calendar.season);
+    for patch in &mut patches.0 {
+        patch.amount = regrowth_step(patch.amount, patch.cap, patch.kind, growing);
+    }
+}
+
 pub fn count_buildings(mut built: ResMut<Built>, structures: Query<&Structure>) {
     let mut counts = [0usize; BUILDING_COUNT];
     for structure in &structures {
@@ -1027,23 +1179,28 @@ pub fn count_buildings(mut built: ResMut<Built>, structures: Query<&Structure>) 
 /// the colony has timber to spare.
 pub fn construction(
     mut commands: Commands,
-    mut construction: ResMut<Construction>,
-    mut ballot: ResMut<Ballot>,
-    mayor: Res<Mayor>,
+    mut council: Council,
+    calendar: Res<Calendar>,
     generator: Res<Generator>,
     structures: Query<(&Pos, &Structure)>,
     citizens: Query<&Citizen>,
 ) {
-    construction.diverting = update_diverting(construction.diverting, generator.fuel);
+    council.construction.diverting =
+        update_diverting(council.construction.diverting, generator.fuel);
 
-    if let Some(site) = &construction.site {
+    if let Some(site) = &council.construction.site {
         if site.delivered >= site.building.rules().cost {
             commands.spawn((Pos(site.pos), Structure(site.building)));
-            construction.site = None;
+            council.construction.site = None;
         }
         return;
     }
-    if !can_afford_project(generator.fuel, construction.diverting) {
+    if !can_afford_project(
+        generator.fuel,
+        citizens.iter().count(),
+        council.construction.diverting,
+        is_growing_season(calendar.season),
+    ) {
         return;
     }
 
@@ -1055,11 +1212,11 @@ pub fn construction(
         .collect();
     let homes: Vec<IVec2> = citizens.iter().map(|citizen| citizen.home).collect();
     let people: Vec<Needs> = citizens.iter().map(|citizen| citizen.needs).collect();
-    let tally = tally_votes(&people, &mayor);
+    let tally = tally_votes(&people, &council.mayor);
     let building = next_project(tally, free_home(&beds, &homes).is_some());
-    ballot.tally = tally;
+    council.ballot.tally = tally;
     if let Some(pos) = next_plot(&taken) {
-        construction.site = Some(Site {
+        council.construction.site = Some(Site {
             pos,
             building,
             delivered: 0,
@@ -1083,7 +1240,12 @@ pub fn colony_growth(
         return;
     }
     let people: Vec<Needs> = citizens.iter().map(|citizen| citizen.needs).collect();
-    if !colony_thrives(met_shares(&people), generator.fuel, granary.food) {
+    if !colony_thrives(
+        met_shares(&people),
+        generator.fuel,
+        granary.food,
+        people.len(),
+    ) {
         return;
     }
     let sites: Vec<IVec2> = houses
@@ -1093,6 +1255,10 @@ pub fn colony_growth(
         .collect();
     let mut homes: Vec<IVec2> = citizens.iter().map(|citizen| citizen.home).collect();
     let ages: Vec<f32> = citizens.iter().map(|citizen| citizen.age).collect();
+    let children = ages.iter().filter(|age| !is_adult(**age)).count();
+    if !has_hands_to_spare(children, ages.len()) {
+        return;
+    }
     let pairs = couples(&ages);
     let chance = birth_chance_per_check(birth_chance_per_season(spare_beds(&sites, &homes), pairs));
 
@@ -1132,13 +1298,12 @@ pub fn colony_growth(
 pub fn citizen_ai(
     mut commands: Commands,
     tick: Res<Tick>,
+    air: Res<Air>,
     built: Res<Built>,
     mut colony: Colony,
     mut citizens: Query<(Entity, &mut Pos, &mut Citizen)>,
 ) {
-    // One reading for the whole tick, so a citizen's luck does not depend on the
-    // order the deliveries happen to land in.
-    let output = generator_output(colony.generator.fuel, built.of(Building::GeneratorUpgrade));
+    let air = *air;
     let site_pos = colony.construction.site.as_ref().map(|site| site.pos);
     let population = citizens.iter().count();
     // Who is already committed to fetching what, kept up to date as citizens
@@ -1164,7 +1329,7 @@ pub fn citizen_ai(
         if eating {
             colony.granary.food -= FOOD_PER_MEAL;
         }
-        let warm = heat_at(pos.0, output) >= 0.0;
+        let warm = air.heat_at(pos.0) >= 0.0;
         let met = [warm, duty == Duty::Rest && at_home, eating];
         for (index, kind) in NEEDS.into_iter().enumerate() {
             let scale = if kind == NeedKind::Warmth && at_home {
@@ -1189,6 +1354,13 @@ pub fn citizen_ai(
             }
         }
 
+        let supply = Supply {
+            fuel: colony.generator.fuel,
+            food: colony.granary.food,
+            inbound,
+            population,
+            huts: built.of(Building::HuntersHut),
+        };
         if let Some(cargo) = citizen.carrying {
             let drop_off = delivery_target(cargo, colony.construction.diverting, site_pos);
             if (pos.0 - drop_off).abs().max_element() <= 1 {
@@ -1204,16 +1376,7 @@ pub fn citizen_ai(
                     }
                 }
                 citizen.carrying = None;
-                let next = haul_choice(
-                    citizen.hauling,
-                    Supply {
-                        fuel: colony.generator.fuel,
-                        food: colony.granary.food,
-                        inbound,
-                        population,
-                        huts: built.of(Building::HuntersHut),
-                    },
-                );
+                let next = haul_choice(citizen.hauling, supply);
                 if next != citizen.hauling {
                     inbound[citizen.hauling as usize] -= 1;
                     inbound[next as usize] += 1;
@@ -1222,7 +1385,12 @@ pub fn citizen_ai(
             }
         }
 
-        let source = gather_source(&colony.patches, citizen.hauling, pos.0);
+        let source = gather_source(
+            &colony.patches,
+            citizen.hauling,
+            pos.0,
+            supply.wants(citizen.hauling.other()),
+        );
         if duty == Duty::Gather
             && let Some((cell, kind)) = source
             && cell == pos.0
@@ -1239,7 +1407,7 @@ pub fn citizen_ai(
         });
         let target = duty_target(
             duty,
-            output,
+            air,
             citizen.home,
             drop_off,
             source.map(|(cell, _)| cell),
@@ -1264,6 +1432,14 @@ mod tests {
             .collect()
     }
 
+    /// The air with the fire at a given stock, on a day of average cold.
+    fn air(fuel: u32, upgrades: usize) -> Air {
+        Air {
+            output: generator_output(fuel, upgrades),
+            ambient: AMBIENT_MEAN,
+        }
+    }
+
     fn need_at(level: f32) -> Need {
         Need {
             level,
@@ -1277,18 +1453,18 @@ mod tests {
 
     #[test]
     fn heat_falls_off_with_distance() {
-        let output = generator_output(FULL_BURN_FUEL, 0);
-        let near = heat_at(CENTER + IVec2::new(1, 0), output);
-        let far = heat_at(CENTER + IVec2::new(10, 0), output);
+        let lit = air(FULL_BURN_FUEL, 0);
+        let near = lit.heat_at(CENTER + IVec2::new(1, 0));
+        let far = lit.heat_at(CENTER + IVec2::new(10, 0));
         assert!(near > far);
-        assert!(heat_at(CENTER, output) > 0.0);
+        assert!(lit.heat_at(CENTER) > 0.0);
     }
 
     #[test]
     fn heat_is_ambient_when_generator_is_off() {
-        let dead = generator_output(0, 0);
-        assert_eq!(heat_at(CENTER, dead), AMBIENT);
-        assert_eq!(heat_at(CENTER + IVec2::new(5, 5), dead), AMBIENT);
+        let dead = air(0, 0);
+        assert_eq!(dead.heat_at(CENTER), AMBIENT_MEAN);
+        assert_eq!(dead.heat_at(CENTER + IVec2::new(5, 5)), AMBIENT_MEAN);
     }
 
     #[test]
@@ -1320,9 +1496,9 @@ mod tests {
     #[test]
     fn the_warm_zone_shrinks_as_the_stock_runs_down() {
         let warm_radius = |fuel| {
-            let output = generator_output(fuel, 0);
+            let lit = air(fuel, 0);
             (0..=R)
-                .filter(|d| heat_at(CENTER + IVec2::new(*d, 0), output) > 0.0)
+                .filter(|d| lit.heat_at(CENTER + IVec2::new(*d, 0)) > 0.0)
                 .count()
         };
         assert!(warm_radius(FULL_BURN_FUEL) > warm_radius(FULL_BURN_FUEL / 2));
@@ -1333,11 +1509,8 @@ mod tests {
     #[test]
     fn citizens_fall_back_to_their_own_roof_when_the_square_goes_cold() {
         let home = IVec2::new(3, 4);
-        assert_eq!(
-            warmth_target(generator_output(FULL_BURN_FUEL, 0), home),
-            CENTER
-        );
-        assert_eq!(warmth_target(generator_output(0, 0), home), home);
+        assert_eq!(air(FULL_BURN_FUEL, 0).warmth_target(home), CENTER);
+        assert_eq!(air(0, 0).warmth_target(home), home);
     }
 
     #[test]
@@ -1572,7 +1745,7 @@ mod tests {
         let home = IVec2::new(3, 4);
         let drop_off = IVec2::new(7, 8);
         let patch = IVec2::new(1, 1);
-        let lit = generator_output(FULL_BURN_FUEL, 0);
+        let lit = air(FULL_BURN_FUEL, 0);
         assert_eq!(
             duty_target(Duty::WarmUp, lit, home, drop_off, Some(patch)),
             CENTER
@@ -1600,18 +1773,12 @@ mod tests {
         let home = IVec2::new(3, 4);
         let drop_off = IVec2::new(7, 8);
         assert_eq!(
-            duty_target(
-                Duty::Gather,
-                generator_output(FULL_BURN_FUEL, 0),
-                home,
-                drop_off,
-                None
-            ),
+            duty_target(Duty::Gather, air(FULL_BURN_FUEL, 0), home, drop_off, None),
             CENTER,
             "while the fire burns, idle citizens huddle around it"
         );
         assert_eq!(
-            duty_target(Duty::Gather, generator_output(0, 0), home, drop_off, None),
+            duty_target(Duty::Gather, air(0, 0), home, drop_off, None),
             home,
             "once it is out, the only shelter left is their own roof"
         );
@@ -1743,9 +1910,17 @@ mod tests {
     }
 
     #[test]
-    fn the_band_widens_with_every_hut_that_makes_a_haul_worth_more() {
-        assert!(haul_switch_margin(30, 1) > haul_switch_margin(30, 0));
-        assert!(haul_switch_margin(30, 3) > haul_switch_margin(30, 1));
+    fn the_band_widens_with_every_hut_until_it_hits_its_ceiling() {
+        // A big workforce keeps one haul's swing small, so the ceiling stays
+        // out of the way and the widening is visible on its own.
+        let roomy = 200;
+        assert!(haul_switch_margin(roomy, 1) > haul_switch_margin(roomy, 0));
+        assert!(haul_switch_margin(roomy, 3) > haul_switch_margin(roomy, 1));
+        assert_eq!(
+            haul_switch_margin(30, 3),
+            HAUL_SWITCH_MAX,
+            "and stops once it would swallow the decision"
+        );
     }
 
     #[test]
@@ -1786,21 +1961,23 @@ mod tests {
                 pos: CENTER + IVec2::new(4, 0),
                 kind: Cargo::Wood,
                 amount: 0,
+                cap: 0,
             },
             Patch {
                 pos: CENTER + IVec2::new(0, 4),
                 kind: Cargo::Food,
                 amount: 5,
+                cap: 5,
             },
         ]);
         let from = CENTER;
         assert_eq!(
-            gather_source(&patches, Cargo::Wood, from),
+            gather_source(&patches, Cargo::Wood, from, true),
             Some((CENTER + IVec2::new(0, 4), Cargo::Food)),
             "a stripped forest sends the hauler after game instead"
         );
         patches.0[1].amount = 0;
-        assert_eq!(gather_source(&patches, Cargo::Wood, from), None);
+        assert_eq!(gather_source(&patches, Cargo::Wood, from, true), None);
     }
 
     #[test]
@@ -1810,15 +1987,17 @@ mod tests {
                 pos: CENTER + IVec2::new(9, 0),
                 kind: Cargo::Wood,
                 amount: 5,
+                cap: 5,
             },
             Patch {
                 pos: CENTER + IVec2::new(0, 2),
                 kind: Cargo::Food,
                 amount: 5,
+                cap: 5,
             },
         ]);
         assert_eq!(
-            gather_source(&patches, Cargo::Wood, CENTER),
+            gather_source(&patches, Cargo::Wood, CENTER, true),
             Some((CENTER + IVec2::new(9, 0), Cargo::Wood)),
             "the nearer patch of the wrong kind does not win"
         );
@@ -1831,6 +2010,7 @@ mod tests {
             pos,
             kind: Cargo::Wood,
             amount: 2,
+            cap: 2,
         }]);
         take_from_patch(&mut patches, pos);
         assert_eq!(patches.0[0].amount, 1);
@@ -1890,29 +2070,39 @@ mod tests {
     fn an_empty_colony_has_no_comfort_and_does_not_grow() {
         let shares = met_shares(&[]);
         assert_eq!(shares, [0.0; NEED_COUNT]);
-        assert!(!colony_thrives(shares, u32::MAX, u32::MAX));
+        assert!(!colony_thrives(shares, u32::MAX, u32::MAX, 0));
     }
 
     #[test]
-    fn growth_needs_every_need_met_and_both_stockpiles() {
+    fn growth_needs_every_need_met_and_both_stores_at_target() {
         let full = [1.0; NEED_COUNT];
-        assert!(colony_thrives(full, BIRTH_FUEL_MIN, BIRTH_FOOD_MIN));
-        assert!(
-            !colony_thrives(full, BIRTH_FUEL_MIN - 1, BIRTH_FOOD_MIN),
-            "no wood"
-        );
-        assert!(
-            !colony_thrives(full, BIRTH_FUEL_MIN, BIRTH_FOOD_MIN - 1),
-            "no food"
-        );
+        let pop = 30;
+        let fuel = (pop as f32 * FUEL_PER_CITIZEN).ceil() as u32;
+        let food = (pop as f32 * FOOD_PER_CITIZEN).ceil() as u32;
+        assert!(colony_thrives(full, fuel, food, pop));
+        assert!(!colony_thrives(full, 0, food, pop), "no wood");
+        assert!(!colony_thrives(full, fuel, 0, pop), "no food");
         for kind in NEEDS {
             let mut shares = full;
             shares[kind as usize] = GROWTH_SHARE - 0.1;
             assert!(
-                !colony_thrives(shares, BIRTH_FUEL_MIN, BIRTH_FOOD_MIN),
+                !colony_thrives(shares, fuel, food, pop),
                 "a colony short on {kind:?} must not grow"
             );
         }
+    }
+
+    #[test]
+    fn what_counts_as_enough_grows_with_the_colony() {
+        let full = [1.0; NEED_COUNT];
+        let small = 20;
+        let fuel = (small as f32 * FUEL_PER_CITIZEN).ceil() as u32;
+        let food = (small as f32 * FOOD_PER_CITIZEN).ceil() as u32;
+        assert!(colony_thrives(full, fuel, food, small));
+        assert!(
+            !colony_thrives(full, fuel, food, small * 2),
+            "the same stores do not stretch to twice the mouths"
+        );
     }
 
     #[test]
@@ -2049,25 +2239,45 @@ mod tests {
 
     #[test]
     fn a_project_waits_until_the_fire_has_a_reserve_behind_it() {
-        assert!(can_afford_project(BUILD_RESERVE, true));
+        let population = 30;
+        let reserve = (population as f32 * FUEL_PER_CITIZEN * BUILD_RESERVE_SHARE).ceil() as u32;
+        assert!(can_afford_project(reserve, population, true, true));
         assert!(
-            !can_afford_project(BUILD_RESERVE - 1, true),
+            !can_afford_project(reserve / 2, population, true, true),
             "the reserve is not spent on building"
         );
         assert!(
-            !can_afford_project(BUILD_RESERVE * 10, false),
+            !can_afford_project(reserve * 10, population, false, true),
             "a colony that is not sparing wood does not break ground"
+        );
+        assert!(
+            !can_afford_project(reserve * 10, population, true, false),
+            "and nothing is begun in a season that grows nothing back"
+        );
+        assert!(
+            !can_afford_project(reserve, population * 3, true, true),
+            "the same pile is not a reserve for three times the mouths"
+        );
+    }
+
+    #[test]
+    fn huts_stop_helping_past_a_handful() {
+        assert!(food_yield(USEFUL_HUTS) > food_yield(USEFUL_HUTS - 1));
+        assert_eq!(
+            food_yield(USEFUL_HUTS * 5),
+            food_yield(USEFUL_HUTS),
+            "a twentieth shed does not dress a carcass any faster"
         );
     }
 
     #[test]
     fn a_boiler_burns_hotter_and_reaches_further() {
-        let plain = generator_output(FULL_BURN_FUEL, 0);
-        let upgraded = generator_output(FULL_BURN_FUEL, 1);
-        assert!(upgraded > plain);
-        let reach = |output| {
+        let plain = air(FULL_BURN_FUEL, 0);
+        let upgraded = air(FULL_BURN_FUEL, 1);
+        assert!(upgraded.output > plain.output);
+        let reach = |lit: Air| {
             (0..=R)
-                .filter(|d| heat_at(CENTER + IVec2::new(*d, 0), output) > 0.0)
+                .filter(|d| lit.heat_at(CENTER + IVec2::new(*d, 0)) > 0.0)
                 .count()
         };
         assert!(
@@ -2379,12 +2589,12 @@ mod tests {
 
     #[test]
     fn every_founder_starts_inside_the_warm_ring() {
-        let output = generator_output(START_FUEL, 0);
+        let lit = air(START_FUEL, 0);
         for i in 0..CITIZENS {
             let angle = i as f32 / CITIZENS as f32 * std::f32::consts::TAU;
             let start = ring_pos(START_RING, angle);
             assert!(
-                heat_at(start, output) >= 0.0,
+                lit.heat_at(start) >= 0.0,
                 "a founder must not start out in the cold"
             );
         }
@@ -2630,5 +2840,202 @@ mod tests {
     fn seeds_are_handed_out_from_the_first_one() {
         let mut lineage = Lineage::default();
         assert_eq!(lineage.next(), 1, "there is no citizen zero");
+    }
+
+    /// The tick that lands on a given day of a given year.
+    fn day_of(year: u64, day: u64) -> u64 {
+        (year - 1) * ticks_per_year() + day * ticks_per_day()
+    }
+
+    #[test]
+    fn the_year_is_mildest_at_midsummer_and_harshest_at_midwinter() {
+        let year = SEVERITY_FULL_YEAR;
+        let midsummer = ambient_at(day_of(year, DAYS_PER_SEASON + DAYS_PER_SEASON / 2));
+        let midwinter = ambient_at(day_of(year, DAYS_PER_SEASON * 3 + DAYS_PER_SEASON / 2));
+        assert!(midsummer > midwinter, "summer must be the mild end");
+        assert!(midwinter < AMBIENT_MEAN, "and winter the harsh one");
+        for day in 0..days_per_year() {
+            let air = ambient_at(day_of(year, day));
+            assert!(air <= midsummer + 1e-3, "day {day} beat midsummer");
+            assert!(air >= midwinter - 1e-3, "day {day} beat midwinter");
+        }
+    }
+
+    #[test]
+    fn the_air_drifts_rather_than_jumps() {
+        let mut previous = ambient_at(0);
+        for day in 1..days_per_year() * 3 {
+            let air = ambient_at(day * ticks_per_day());
+            assert!(
+                (air - previous).abs() < AMBIENT_SWING / 4.0,
+                "the air moved too far in a day, at day {day}"
+            );
+            previous = air;
+        }
+    }
+
+    #[test]
+    fn winter_pulls_the_freezing_line_inside_the_treeline() {
+        let year = SEVERITY_FULL_YEAR;
+        let midwinter = Air {
+            output: generator_output(FULL_BURN_FUEL, 0),
+            ambient: ambient_at(day_of(year, DAYS_PER_SEASON * 3 + DAYS_PER_SEASON / 2)),
+        };
+        assert!(
+            midwinter.heat_at(CENTER + IVec2::new(PATCH_RADIUS, 0)) < 0.0,
+            "a hauler at the treeline must feel it in deep winter"
+        );
+        assert!(
+            midwinter.heat_at(CENTER) > 0.0,
+            "the square itself still holds"
+        );
+    }
+
+    #[test]
+    fn a_boiler_gives_the_cold_somewhere_to_push_back() {
+        let year = SEVERITY_FULL_YEAR;
+        let ambient = ambient_at(day_of(year, DAYS_PER_SEASON * 3 + DAYS_PER_SEASON / 2));
+        let reach = |upgrades| {
+            let air = Air {
+                output: generator_output(FULL_BURN_FUEL, upgrades),
+                ambient,
+            };
+            (0..=R)
+                .filter(|d| air.heat_at(CENTER + IVec2::new(*d, 0)) > 0.0)
+                .count()
+        };
+        assert!(
+            reach(1) > reach(0),
+            "a boiler must buy real ground back in the winter that votes for it"
+        );
+    }
+
+    #[test]
+    fn the_first_winter_is_gentler_than_the_ones_that_follow() {
+        assert!(severity(1) < severity(2));
+        assert!(severity(2) < severity(SEVERITY_FULL_YEAR));
+        assert!(severity(1) > 0.0, "a mild winter is still a winter");
+    }
+
+    #[test]
+    fn severity_stops_once_it_reaches_full_depth() {
+        assert_eq!(severity(SEVERITY_FULL_YEAR), 1.0);
+        assert_eq!(severity(SEVERITY_FULL_YEAR + 10), 1.0);
+    }
+
+    #[test]
+    fn a_gentler_first_winter_is_warmer_than_a_later_one() {
+        let day = DAYS_PER_SEASON * 3 + DAYS_PER_SEASON / 2;
+        assert!(ambient_at(day_of(1, day)) > ambient_at(day_of(SEVERITY_FULL_YEAR, day)));
+    }
+
+    #[test]
+    fn summers_do_not_get_worse_with_the_years() {
+        let day = DAYS_PER_SEASON + DAYS_PER_SEASON / 2;
+        assert_eq!(
+            ambient_at(day_of(1, day)),
+            ambient_at(day_of(SEVERITY_FULL_YEAR, day)),
+            "the ramp is on the winters, not the whole year"
+        );
+    }
+
+    #[test]
+    fn three_seasons_grow_and_winter_does_not() {
+        assert!(is_growing_season(Season::Spring));
+        assert!(is_growing_season(Season::Summer));
+        assert!(is_growing_season(Season::Autumn));
+        assert!(!is_growing_season(Season::Winter));
+    }
+
+    #[test]
+    fn a_patch_grows_back_towards_its_cap_and_stops_there() {
+        for kind in [Cargo::Wood, Cargo::Food] {
+            let cap = 10;
+            assert_eq!(
+                regrowth_step(0, cap, kind, false),
+                0,
+                "nothing grows in winter"
+            );
+            let grown = regrowth_step(0, cap, kind, true);
+            assert!(grown > 0, "a stripped patch comes back");
+            assert_eq!(
+                regrowth_step(cap, cap, kind, true),
+                cap,
+                "and stops at its cap"
+            );
+            assert_eq!(
+                regrowth_step(cap - 1, cap, kind, true),
+                cap,
+                "without overshooting it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_year_is_its_seasons_worth_of_days() {
+        assert_eq!(days_per_year(), DAYS_PER_SEASON * SEASONS_PER_YEAR);
+    }
+
+    #[test]
+    fn the_band_never_grows_wider_than_the_decision_it_damps() {
+        for huts in 0..8 {
+            for population in [1usize, 5, 30, 100] {
+                assert!(
+                    haul_switch_margin(population, huts) <= HAUL_SWITCH_MAX,
+                    "a band wider than a store's target is a latch, not a deadband"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_granary_pulls_haulers_over_however_many_huts_stand() {
+        let population = 30;
+        let starving = supply(40, 0, population, 5);
+        assert_eq!(
+            haul_choice(Cargo::Wood, starving),
+            Cargo::Food,
+            "nobody may walk past a full hunting ground while the granary is empty"
+        );
+    }
+
+    #[test]
+    fn a_hauler_leaves_a_store_alone_that_the_colony_has_enough_of() {
+        let patches = Patches(vec![
+            Patch {
+                pos: CENTER + IVec2::new(4, 0),
+                kind: Cargo::Wood,
+                amount: 0,
+                cap: 0,
+            },
+            Patch {
+                pos: CENTER + IVec2::new(0, 4),
+                kind: Cargo::Food,
+                amount: 5,
+                cap: 5,
+            },
+        ]);
+        assert!(gather_source(&patches, Cargo::Wood, CENTER, true).is_some());
+        assert_eq!(
+            gather_source(&patches, Cargo::Wood, CENTER, false),
+            None,
+            "with the granary already over target, going out for more buys nothing"
+        );
+    }
+
+    #[test]
+    fn a_colony_already_carrying_its_share_of_children_stops_having_them() {
+        let population = 40;
+        let comfortable = (population as f32 * MAX_DEPENDENT_SHARE) as usize;
+        assert!(has_hands_to_spare(comfortable, population));
+        assert!(
+            !has_hands_to_spare(comfortable + 1, population),
+            "past the share the next child is paid for out of everyone's ration"
+        );
+        assert!(has_hands_to_spare(0, population));
+        assert!(
+            !has_hands_to_spare(0, 0),
+            "an empty colony has no hands at all"
+        );
     }
 }

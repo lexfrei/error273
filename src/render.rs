@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 
 use crate::sim::{
-    ADULT_AGE, BUILDINGS, Ballot, Building, CENTER, Calendar, Cargo, Citizen, Construction,
-    FRAILTY_ONSET, NeedKind, Pos, R, Stores, Structure, Tick, couples, is_adult,
+    ADULT_AGE, BUILDINGS, Ballot, Building, CENTER, Cargo, Citizen, Construction, FRAILTY_ONSET,
+    NeedKind, Outside, Pos, R, Stores, Structure, Tick, couples, is_adult,
 };
 
 pub fn clear_screen() {
@@ -11,7 +11,7 @@ pub fn clear_screen() {
 
 pub fn render(
     tick: Res<Tick>,
-    calendar: Res<Calendar>,
+    outside: Outside,
     stores: Stores,
     construction: Res<Construction>,
     ballot: Res<Ballot>,
@@ -73,12 +73,13 @@ pub fn render(
         None => "none".to_string(),
     };
     out.push_str(&format!(
-        "tick {:5}  year {}  {:<6}  day {:2}  hour {:02}\n",
+        "tick {:5}  year {}  {:<6}  day {:2}  hour {:02}  air {:+.0}\n",
         tick.0,
-        calendar.year,
-        calendar.season.name(),
-        calendar.day,
-        calendar.hour
+        outside.calendar.year,
+        outside.calendar.season.name(),
+        outside.calendar.day,
+        outside.calendar.hour,
+        outside.air.ambient
     ));
     out.push_str(&format!(
         "pop {:3}  fuel {:4}  food {:4}  wood {:4}  game {:4}\n",
