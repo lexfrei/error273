@@ -211,9 +211,10 @@ pub const FIT_CEILING: f32 = 1.8;
 /// Hard-wired until the mood layer fills it. The shape is here so that layer
 /// has somewhere to land without touching anything that reads a stat.
 pub const FOCUS_UNTIL_MOOD_EXISTS: f32 = 1.0;
-/// What anybody brings back, before what they are is counted. Set so a green
-/// founder averages about the one unit every citizen used to carry.
-pub const HAUL_BASE: f32 = 0.6;
+/// What anybody carries, before what they are is counted. One, because a load
+/// is taken from the patch at the moment it is picked up and a trip that lifted
+/// nothing would still have stripped the treeline.
+pub const HAUL_BASE: f32 = 1.0;
 pub const HAUL_LOAD_SWING: f32 = 1.0;
 // Distance is the Chebyshev norm, which is the true travel time under
 // one-cell-per-tick king moves, and is deliberately the wrong distance for
@@ -458,7 +459,7 @@ pub fn effective_stat(base: f32, focus_mult: f32, trade_fit_mult: f32) -> f32 {
 /// anything the colony raised turns into capacity rather than survival.
 pub fn haul_load(effective: f32, banked: f32) -> (u32, f32) {
     let earned = banked + HAUL_BASE + effective.max(0.0) * HAUL_LOAD_SWING;
-    let whole = earned.floor().max(0.0);
+    let whole = earned.floor();
     (whole as u32, earned - whole)
 }
 
@@ -1088,6 +1089,8 @@ pub struct Citizen {
     /// The part of a load they were owed and could not carry, kept for the next
     /// trip so nothing is lost to rounding.
     pub banked: f32,
+    /// How much they lifted, decided when they lifted it.
+    pub load: u32,
     /// What they do with their days, and what they have practised at.
     pub trade: Trade,
     pub experience: [f32; TRADE_COUNT],
@@ -1446,9 +1449,16 @@ pub fn gather_source(
     }
 }
 
-pub fn take_from_patch(patches: &mut Patches, pos: IVec2) {
-    if let Some(patch) = patches.0.iter_mut().find(|patch| patch.pos == pos) {
-        patch.amount = patch.amount.saturating_sub(1);
+/// Strips a patch of what a hauler actually lifted, and hands back what was
+/// there to lift. What leaves the ground has to equal what reaches the store.
+pub fn take_from_patch(patches: &mut Patches, pos: IVec2, wanted: u32) -> u32 {
+    match patches.0.iter_mut().find(|patch| patch.pos == pos) {
+        Some(patch) => {
+            let taken = wanted.min(patch.amount);
+            patch.amount -= taken;
+            taken
+        }
+        None => 0,
     }
 }
 
@@ -1816,6 +1826,7 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
                 acclimated: 0.0,
                 watched: 0.0,
                 banked: 0.0,
+                load: 0,
                 trade: founding_trade(i),
                 experience: [0.0; TRADE_COUNT],
                 age: founder_age(i, CITIZENS),
@@ -2191,6 +2202,7 @@ pub fn colony_growth(
                 acclimated: 0.0,
                 watched: 0.0,
                 banked: 0.0,
+                load: 0,
                 // A child is nobody's tradesman until they are grown.
                 trade: Trade::Laborer,
                 experience: [0.0; TRADE_COUNT],
@@ -2288,18 +2300,11 @@ pub fn citizen_ai(
             if (pos.0 - drop_off).abs().max_element() <= 1 {
                 // What a citizen carries home is the one place what the colony
                 // raised in them turns into capacity rather than survival.
-                let raised = citizen.upbringing.stats().of(trade_stat(citizen.trade));
-                let fit = trade_fit(raised, citizen.experience[citizen.trade as usize]);
-                let (load, banked) = haul_load(
-                    effective_stat(raised, FOCUS_UNTIL_MOOD_EXISTS, fit),
-                    citizen.banked,
-                );
-                citizen.banked = banked;
                 let yield_each = match cargo {
                     Cargo::Wood => 1,
                     Cargo::Food => food_yield(built.of(Building::HuntersHut)),
                 };
-                let brought = load * yield_each;
+                let brought = citizen.load * yield_each;
                 let to_the_site = match (cargo, colony.construction.site.as_ref()) {
                     (Cargo::Wood, Some(site))
                         if log_goes_to_site(drop_off, site.pos, site.delivered, site.building) =>
@@ -2341,8 +2346,20 @@ pub fn citizen_ai(
             && let Some((cell, kind)) = source
             && cell == pos.0
         {
-            take_from_patch(&mut colony.patches, cell);
-            citizen.carrying = Some(kind);
+            // What a citizen lifts is decided here, where it comes out of the
+            // ground, so that what leaves the patch is what reaches the store.
+            let raised = citizen.upbringing.stats().of(trade_stat(citizen.trade));
+            let fit = trade_fit(raised, citizen.experience[citizen.trade as usize]);
+            let (wanted, banked) = haul_load(
+                effective_stat(raised, FOCUS_UNTIL_MOOD_EXISTS, fit),
+                citizen.banked,
+            );
+            let lifted = take_from_patch(&mut colony.patches, cell, wanted);
+            if lifted > 0 {
+                citizen.banked = banked;
+                citizen.load = lifted;
+                citizen.carrying = Some(kind);
+            }
         }
 
         // Handing a load over or picking one up flips this tick's duty; nothing
@@ -2979,13 +2996,22 @@ mod tests {
             amount: 2,
             cap: 2,
         }]);
-        take_from_patch(&mut patches, pos);
+        assert_eq!(take_from_patch(&mut patches, pos, 1), 1);
         assert_eq!(patches.0[0].amount, 1);
-        take_from_patch(&mut patches, pos);
-        take_from_patch(&mut patches, pos);
+        assert_eq!(
+            take_from_patch(&mut patches, pos, 5),
+            1,
+            "a patch hands over only what is standing on it"
+        );
         assert_eq!(
             patches.0[0].amount, 0,
             "a stripped patch must not underflow"
+        );
+        assert_eq!(take_from_patch(&mut patches, pos, 3), 0);
+        assert_eq!(
+            take_from_patch(&mut patches, CENTER, 1),
+            0,
+            "and there is nothing to lift where there is no patch"
         );
     }
 
@@ -4767,10 +4793,17 @@ mod tests {
     }
 
     #[test]
-    fn nobody_ever_comes_home_owing_the_colony() {
-        let (load, banked) = haul_load(-5.0, 0.0);
-        assert_eq!(load, 0, "a load is never negative");
-        assert!((0.0..1.0).contains(&banked));
+    fn a_trip_never_lifts_nothing() {
+        // The patch is stripped for a load at the moment it is picked up, so a
+        // trip that carried nothing would have destroyed what it left behind.
+        for effective in [-5.0, 0.0, 0.01, FIT_CEILING] {
+            let (load, banked) = haul_load(effective, 0.0);
+            assert!(
+                load >= 1,
+                "a trip that lifts nothing strips the treeline for free"
+            );
+            assert!((0.0..1.0).contains(&banked));
+        }
     }
 
     #[test]
