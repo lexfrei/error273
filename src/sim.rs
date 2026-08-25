@@ -127,6 +127,9 @@ pub const BOILER_WOOD_COST: u32 = 24;
 // can keep it fed.
 pub const UPGRADE_HEAT: f32 = 18.0;
 pub const BUILDING_COUNT: usize = 3;
+// What the colony keeps behind the fire before it will break ground on a
+// project, so building never comes straight out of the next few nights.
+pub const BUILD_RESERVE: u32 = 50;
 // Hysteresis on the colony's wood policy: only a comfortable stock is diverted
 // to a building site, and a project is not abandoned the moment it dips.
 pub const FUEL_SPARE_HIGH: u32 = 58;
@@ -210,13 +213,6 @@ pub struct Need {
     pub pressing: bool,
 }
 
-impl Need {
-    /// Urgency on a common 0..=1 scale.
-    pub fn pressure(self) -> f32 {
-        (NEED_MAX - self.level) / NEED_MAX
-    }
-}
-
 pub fn need_step(need: Need, kind: NeedKind, met: bool, decay_scale: f32) -> Need {
     let rules = kind.rules();
     let level = if met {
@@ -279,18 +275,27 @@ impl Needs {
             .any(|kind| kind.rules().fatal && self.level(kind) <= 0.0)
     }
 
+    /// How far a need has fallen through the band its citizen tolerates: zero at
+    /// the mark where they stop acting on it, one where they start, and past one
+    /// when it is worse than that. Bands differ per need, so this is what makes
+    /// hunger and cold comparable at all.
+    pub fn shortfall(&self, kind: NeedKind) -> f32 {
+        let rules = kind.rules();
+        (rules.high - self.level(kind)) / (rules.high - rules.low)
+    }
+
     pub fn comfortable(&self, kind: NeedKind) -> bool {
         self.level(kind) >= kind.rules().comfort
     }
 
-    /// Pressing needs, worst first. The sort is stable, so equal pressure keeps
-    /// `NEEDS` order and the same colony state always decides the same way.
+    /// Pressing needs, worst first. The sort is stable, so equally short needs
+    /// keep `NEEDS` order and the same colony state always decides the same way.
     pub fn pressing_by_urgency(&self) -> Vec<NeedKind> {
         let mut pressing: Vec<NeedKind> = NEEDS
             .into_iter()
             .filter(|kind| self.get(*kind).pressing)
             .collect();
-        pressing.sort_by(|a, b| self.get(*b).pressure().total_cmp(&self.get(*a).pressure()));
+        pressing.sort_by(|a, b| self.shortfall(*b).total_cmp(&self.shortfall(*a)));
         pressing
     }
 }
@@ -399,6 +404,22 @@ impl Building {
             },
         }
     }
+}
+
+/// The mayor's office: a weight per building type, added to the ballot before
+/// it is read. Deliberately inert -- this is data with no behaviour, and the
+/// place a policy layer from outside the colony reaches in. Anything that wants
+/// to scale or gate these weights wraps the struct rather than editing voting.
+#[derive(Resource, Default)]
+pub struct Mayor {
+    pub bias: [f32; BUILDING_COUNT],
+}
+
+/// The last ballot the colony held, kept so it can be shown.
+#[derive(Resource, Default)]
+pub struct Ballot {
+    pub tally: [f32; BUILDING_COUNT],
+    pub decided: Option<Building>,
 }
 
 /// A finished building standing on a plot.
@@ -638,19 +659,51 @@ pub fn building_for(kind: NeedKind) -> Building {
     }
 }
 
-/// What the colony most needs put up, judged by which need the fewest citizens
-/// have comfortably met. Beds come first when there are none to be had: with
-/// every bed taken, nothing else the colony builds will let it grow.
-pub fn needed_building(shares: [f32; NEED_COUNT], free_bed: bool) -> Building {
+/// How one citizen votes: for whatever answers whichever of their needs has
+/// fallen furthest through its own band. Everybody has an opinion. The strict
+/// comparison keeps the first of any equals, so ties resolve in table order.
+pub fn vote_of(needs: &Needs) -> Building {
+    let mut worst = NEEDS[0];
+    for kind in NEEDS {
+        if needs.shortfall(kind) > needs.shortfall(worst) {
+            worst = kind;
+        }
+    }
+    building_for(worst)
+}
+
+/// The ballot: one voice each, on top of whatever the mayor's office is
+/// leaning on. The mayor does not get a vote, only a thumb on the scale.
+pub fn tally_votes(people: &[Needs], mayor: &Mayor) -> [f32; BUILDING_COUNT] {
+    let mut tally = mayor.bias;
+    for needs in people {
+        tally[vote_of(needs) as usize] += 1.0;
+    }
+    tally
+}
+
+pub fn winner(tally: [f32; BUILDING_COUNT]) -> Building {
+    let mut best = BUILDINGS[0];
+    for building in BUILDINGS {
+        if tally[building as usize] > tally[best as usize] {
+            best = building;
+        }
+    }
+    best
+}
+
+/// What the colony puts up next. The ballot decides, except that with every bed
+/// taken a house is not a preference but the precondition for growing at all.
+pub fn next_project(tally: [f32; BUILDING_COUNT], free_bed: bool) -> Building {
     if !free_bed {
         return Building::House;
     }
-    // `min_by` keeps the first of any equals, so ties resolve in table order.
-    let worst = NEEDS
-        .into_iter()
-        .min_by(|a, b| shares[*a as usize].total_cmp(&shares[*b as usize]))
-        .expect("the need table is never empty");
-    building_for(worst)
+    winner(tally)
+}
+
+/// Whether there is enough fuel behind the fire to break ground on anything.
+pub fn can_afford_project(fuel: u32, diverting: bool) -> bool {
+    diverting && fuel >= BUILD_RESERVE
 }
 
 /// Whether a log carried to `drop_off` joins the project rather than the fire.
@@ -751,6 +804,8 @@ pub fn count_buildings(mut built: ResMut<Built>, structures: Query<&Structure>) 
 pub fn construction(
     mut commands: Commands,
     mut construction: ResMut<Construction>,
+    mut ballot: ResMut<Ballot>,
+    mayor: Res<Mayor>,
     generator: Res<Generator>,
     structures: Query<(&Pos, &Structure)>,
     citizens: Query<&Citizen>,
@@ -764,7 +819,7 @@ pub fn construction(
         }
         return;
     }
-    if !construction.diverting {
+    if !can_afford_project(generator.fuel, construction.diverting) {
         return;
     }
 
@@ -776,7 +831,10 @@ pub fn construction(
         .collect();
     let homes: Vec<IVec2> = citizens.iter().map(|citizen| citizen.home).collect();
     let people: Vec<Needs> = citizens.iter().map(|citizen| citizen.needs).collect();
-    let building = needed_building(met_shares(&people), free_home(&beds, &homes).is_some());
+    let tally = tally_votes(&people, &mayor);
+    let building = next_project(tally, free_home(&beds, &homes).is_some());
+    ballot.tally = tally;
+    ballot.decided = Some(building);
     if let Some(pos) = next_plot(&taken) {
         construction.site = Some(Site {
             pos,
@@ -1004,10 +1062,36 @@ mod tests {
     }
 
     #[test]
-    fn a_full_need_presses_for_nothing_and_an_empty_one_presses_hardest() {
-        assert_eq!(need_at(NEED_MAX).pressure(), 0.0);
-        assert_eq!(need_at(0.0).pressure(), 1.0);
-        assert!(need_at(20.0).pressure() > need_at(80.0).pressure());
+    fn shortfall_reads_zero_at_the_high_mark_and_one_at_the_low_one() {
+        for kind in NEEDS {
+            let rules = kind.rules();
+            let mut needs = Needs::newcomer();
+            set(&mut needs, kind, rules.high, false);
+            assert_eq!(needs.shortfall(kind), 0.0, "{kind:?} at the high mark");
+            set(&mut needs, kind, rules.low, true);
+            assert_eq!(needs.shortfall(kind), 1.0, "{kind:?} at the low mark");
+            set(&mut needs, kind, 0.0, true);
+            assert!(
+                needs.shortfall(kind) > 1.0,
+                "{kind:?} can be worse than the band"
+            );
+        }
+    }
+
+    #[test]
+    fn needs_living_in_different_bands_still_compare() {
+        let mut needs = Needs::newcomer();
+        for kind in NEEDS {
+            set(&mut needs, kind, kind.rules().low, true);
+        }
+        let first = needs.shortfall(NEEDS[0]);
+        for kind in NEEDS {
+            assert_eq!(
+                needs.shortfall(kind),
+                first,
+                "every need at its own low mark is equally short"
+            );
+        }
     }
 
     #[test]
@@ -1167,10 +1251,10 @@ mod tests {
     }
 
     #[test]
-    fn equal_pressure_breaks_toward_the_first_listed_need() {
+    fn equally_short_needs_break_toward_the_first_listed_one() {
         let mut needs = Needs::newcomer();
         for kind in [NeedKind::Rest, NeedKind::Food] {
-            set(&mut needs, kind, 5.0, true);
+            set(&mut needs, kind, kind.rules().low, true);
         }
         assert_eq!(
             needs.pressing_by_urgency(),
@@ -1475,32 +1559,117 @@ mod tests {
         );
     }
 
-    #[test]
-    fn beds_come_first_when_there_are_none_to_be_had() {
-        let mut shares = [1.0; NEED_COUNT];
-        shares[NeedKind::Food as usize] = 0.0;
-        assert_eq!(
-            needed_building(shares, false),
-            Building::House,
-            "nothing else the colony builds will let it grow"
-        );
+    fn mayor_leaning(building: Building, weight: f32) -> Mayor {
+        let mut bias = [0.0; BUILDING_COUNT];
+        bias[building as usize] = weight;
+        Mayor { bias }
+    }
+
+    /// A citizen whose only complaint is `kind`, sunk to its low mark.
+    fn voter_short_on(kind: NeedKind) -> Needs {
+        let mut needs = Needs::newcomer();
+        for other in NEEDS {
+            set(&mut needs, other, other.rules().high, false);
+        }
+        set(&mut needs, kind, kind.rules().low, true);
+        needs
     }
 
     #[test]
-    fn with_beds_to_spare_the_worst_served_need_picks_the_project() {
+    fn a_citizen_votes_for_whatever_answers_its_own_worst_need() {
         for kind in NEEDS {
-            let mut shares = [1.0; NEED_COUNT];
-            shares[kind as usize] = 0.0;
-            assert_eq!(needed_building(shares, true), building_for(kind));
+            assert_eq!(vote_of(&voter_short_on(kind)), building_for(kind));
         }
     }
 
     #[test]
-    fn an_evenly_served_colony_picks_the_first_listed_need() {
+    fn a_citizen_short_on_nothing_in_particular_votes_in_table_order() {
+        let mut needs = Needs::newcomer();
+        for kind in NEEDS {
+            set(&mut needs, kind, kind.rules().high, false);
+        }
+        assert_eq!(vote_of(&needs), building_for(NEEDS[0]));
+    }
+
+    #[test]
+    fn the_tally_counts_one_voice_each() {
+        let people = [
+            voter_short_on(NeedKind::Food),
+            voter_short_on(NeedKind::Food),
+            voter_short_on(NeedKind::Rest),
+        ];
+        let tally = tally_votes(&people, &Mayor::default());
+        assert_eq!(tally[Building::HuntersHut as usize], 2.0);
+        assert_eq!(tally[Building::House as usize], 1.0);
+        assert_eq!(tally[Building::GeneratorUpgrade as usize], 0.0);
+    }
+
+    #[test]
+    fn a_neutral_mayor_leaves_the_ballot_alone() {
+        let people = [voter_short_on(NeedKind::Warmth)];
+        let plain = tally_votes(&people, &Mayor::default());
+        assert_eq!(plain[Building::GeneratorUpgrade as usize], 1.0);
+        assert_eq!(winner(plain), Building::GeneratorUpgrade);
+    }
+
+    #[test]
+    fn the_mayor_leans_on_the_tally_without_casting_a_vote() {
+        let people = [voter_short_on(NeedKind::Food)];
+        let tally = tally_votes(&people, &mayor_leaning(Building::House, 2.0));
         assert_eq!(
-            needed_building([0.5; NEED_COUNT], true),
-            building_for(NEEDS[0]),
-            "ties resolve in table order, not by chance"
+            tally[Building::HuntersHut as usize],
+            1.0,
+            "the vote still counts"
+        );
+        assert_eq!(tally[Building::House as usize], 2.0);
+        assert_eq!(
+            winner(tally),
+            Building::House,
+            "and the office can outweigh it"
+        );
+    }
+
+    #[test]
+    fn a_mayor_can_lean_against_a_building_as_well_as_for_it() {
+        let people = [
+            voter_short_on(NeedKind::Food),
+            voter_short_on(NeedKind::Rest),
+        ];
+        let mayor = mayor_leaning(Building::HuntersHut, -2.0);
+        assert_eq!(winner(tally_votes(&people, &mayor)), Building::House);
+    }
+
+    #[test]
+    fn an_even_ballot_resolves_in_table_order() {
+        assert_eq!(winner([0.0; BUILDING_COUNT]), BUILDINGS[0]);
+        let mut tied = [0.0; BUILDING_COUNT];
+        tied[Building::House as usize] = 3.0;
+        tied[Building::HuntersHut as usize] = 3.0;
+        assert_eq!(winner(tied), Building::House, "ties resolve in table order");
+    }
+
+    #[test]
+    fn beds_come_first_when_there_are_none_to_be_had() {
+        let mut ballot = [0.0; BUILDING_COUNT];
+        ballot[Building::HuntersHut as usize] = 99.0;
+        assert_eq!(
+            next_project(ballot, false),
+            Building::House,
+            "nothing else the colony builds will let it grow"
+        );
+        assert_eq!(next_project(ballot, true), Building::HuntersHut);
+    }
+
+    #[test]
+    fn a_project_waits_until_the_fire_has_a_reserve_behind_it() {
+        assert!(can_afford_project(BUILD_RESERVE, true));
+        assert!(
+            !can_afford_project(BUILD_RESERVE - 1, true),
+            "the reserve is not spent on building"
+        );
+        assert!(
+            !can_afford_project(BUILD_RESERVE * 10, false),
+            "a colony that is not sparing wood does not break ground"
         );
     }
 

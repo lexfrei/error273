@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 
 use crate::sim::{
-    BUILDINGS, Building, CENTER, Calendar, Cargo, Citizen, Construction, NeedKind, Pos, R, Stores,
-    Structure, Tick,
+    BUILDINGS, Ballot, Building, CENTER, Calendar, Cargo, Citizen, Construction, NeedKind, Pos, R,
+    Stores, Structure, Tick,
 };
 
 pub fn clear_screen() {
@@ -14,6 +14,7 @@ pub fn render(
     calendar: Res<Calendar>,
     stores: Stores,
     construction: Res<Construction>,
+    ballot: Res<Ballot>,
     structures: Query<(&Pos, &Structure)>,
     citizens: Query<(&Pos, &Citizen)>,
 ) {
@@ -91,7 +92,16 @@ pub fn render(
         .into_iter()
         .map(|building| format!("{} {:3}", building.rules().name, standing_count(building)))
         .collect();
-    out.push_str(&format!("{}  project {}\n", counts.join("  "), project));
+    let votes: Vec<String> = BUILDINGS
+        .into_iter()
+        .map(|building| format!("{:.0}", ballot.tally[building as usize]))
+        .collect();
+    out.push_str(&format!(
+        "{}  project {}  vote {}\n",
+        counts.join("  "),
+        project,
+        votes.join("/")
+    ));
     print!("{out}");
 
     if alive == 0 {
