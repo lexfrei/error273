@@ -172,7 +172,7 @@ pub const WAYSTATION_BURN_EVERY: u64 = 6 * TICKS_PER_HOUR;
 /// not written off, short enough that the colony is not counting the same
 /// absence a decade later.
 pub const MEMORIAL_WOOD_COST: u32 = 8;
-pub const MEMORIAL_AFTER: u64 = TICKS_PER_HOUR * HOURS_PER_DAY * DAYS_PER_SEASON * SEASONS_PER_YEAR;
+pub const MEMORIAL_AFTER: u64 = ticks_per_year();
 
 /// How far past the warmth it already has the colony may put a new fire.
 ///
@@ -1451,7 +1451,9 @@ impl Missing {
         }
     }
 
-    pub fn lost(&mut self, at: IVec2, now: u64) {
+    /// Kept private on purpose: production records an absence through
+    /// `take_note`, which is where the rule about being seen lives.
+    fn lost(&mut self, at: IVec2, now: u64) {
         self.0.push(Lost { at, since: now });
     }
 
@@ -2811,10 +2813,13 @@ pub fn send_scouts(
     // and the colony still decides the same way in every run.
     spare.sort_unstable();
     spare.truncate(wanted);
-    // A leg is drawn from the furthest fire the colony keeps, not from wherever
-    // the scout is standing. Walking out to the last post costs almost nothing,
-    // because the ground between is warm, and everything past it is the reach
-    // the chain was built to buy. It is what a chain of fires is for.
+    // A leg is drawn from the furthest fire the colony keeps rather than from
+    // wherever the scout is standing, because everything past that fire is the
+    // reach the chain was built to buy. The walk out to it is not free: a
+    // brazier holds a ring of about five cells, so most of the ground between
+    // one fire and the next is cold, and a scout arrives having already spent
+    // it. That gap is why the chain does not yet extend anybody's reach, and it
+    // is measured rather than supposed.
     let setting_out = air
         .fires
         .iter()
