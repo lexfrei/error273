@@ -55,8 +55,8 @@ A zero-player game. A generator burns wood in the middle of a frozen world with 
 .................................................
 ..T..............................................
 tick   356  year 1  Spring  day 15  hour 20  air -26
-pop  32  out  0  fuel   64  food   47  wood 1329  game  796
-House  17  Hut   0  Boiler   0  project House 0/12  vote 26/1/0
+pop  32  out  0  missing  0  fuel   64  food   47  wood 1329  game  796
+House  17  Hut   0  Boiler   0  Post   0  project House 0/12  vote 26/1/0/0
 under 15   2  grown  20  over 40  10  couples  12  raised 0.52/0.46/0.53
 eldest #30  52y  str fair   wit good   hard fair    watched  11d (a guess)
 ```
@@ -142,26 +142,6 @@ The air outside the generator's reach follows the calendar: a cosine through the
 
 Treelines and hunting grounds grow back a little every day towards a cap of their own, in spring, summer and autumn. Nothing grows back in winter, which is what makes winter a thing to be survived rather than worked through: whatever is standing when it starts is the whole of what there is until spring. For the same reason the colony will not break ground on a project in winter, and will not break ground at all unless it holds half again what it wants per head behind the fire.
 
-### A fire that is not the hearth
-
-A citizen who walks back to warmth instead of working loses hours, and the ballot's second tier counts them. Where those hours were walked decides what they buy. Hours lost all around the hearth ask for a bigger hearth, because a boiler holds the freezing line six cells further out for everyone; hours lost in one direction ask for a fire over there, because moving warmth only helps if there is somewhere to move it to. The vote is the decision and the site is arithmetic: a waystation goes to the middle of the walks that asked for one, each citizen weighing as many hours as they lost.
-
-It cannot go wherever it likes. A waystation is a brazier and a woodshed, and the shed is filled by haulers walking out to it, so a post further out than somebody can reach and come back from is a post that never burns. The site is drawn back along the line until it is one that can be fed, which means a chain of them cannot be laid in one reach: it grows a link at a time, each fire close enough to the last that the colony can supply it.
-
-Every shed short of wood claims one hauler -- the one standing nearest it -- and takes their load ahead of the hearth, out of the same surplus that pays for building and out of nothing else. One each is what makes a chain a standing tax that grows with its length rather than a levy that empties the hearth the moment a single post stands. A brazier burns its shed down on its own clock whether or not anybody is there, so keeping one lit is a cost the colony carries for as long as it wants the ground.
-
-### Not coming back
-
-A citizen who stops being alive within the ground the colony works is dead, and the colony knows it. Past that ground nobody is watching, so what the colony learns is only that somebody did not come back, and the status line counts them as missing rather than as a death.
-
-There are two ways an absence stops being one. Somebody walks to the spot and finds them, which costs the colony the same trip that lost the first citizen -- so the next scout sent out walks towards the last place anybody was seen instead of a direction drawn from the seed. Or the colony gives up: after a year it raises a slab, which costs wood it could have burned, and a colony that cannot spare the wood keeps waiting, which is the honest version of not being able to afford to grieve. The slab itself is not built anywhere yet; where a reader could go and read it is the chronicle's business, and there is no chronicle.
-
-### Looking
-
-A colony spares a few hands for looking rather than working, and the qualification is having nothing the matter: a citizen the survival tier of the vote has nothing to say about is a citizen whose day the colony is not already spending. They set out from the furthest fire the colony keeps, which is what a chain of fires is for, and walk a leg at a time in a direction and a distance drawn from the world seed, and the distances are heavy-tailed -- half the legs are longer than twice the shortest, a tenth longer than ten times it, and the rare one runs a very long way. That shape is the search-theory answer for sparse targets worth coming back to; it is the mathematics that is borrowed and not the animal behaviour it was once argued from, because the tracks behind that argument turned out to be an artefact of the sensor.
-
-Nothing orders a scout home. What brings them back is the same leash every citizen carries: warmth's marks rise with every cell they put between themselves and the fire, so a scout turns for home when the walk back is all the warmth they have left, and no rule about expeditions had to be written to make that happen. A scout brings back the map and nothing else -- ground they have stood in becomes ground the colony can work, and the colony never unlearns it, even after the square itself is dropped from memory and drawn again.
-
 ### The fire
 
 The generator adds up to 66 on top of whatever the air is doing at its own cell, and 3 less for every cell of distance, so on an average day a well-fed fire holds the freezing line about thirteen cells out and in deep winter closer to nine -- inside the treelines, which is when hauling starts to cost body heat. It only burns that hot when at least twenty units are stacked up; below that the grate is banked low and the warm ring shrinks with the woodpile, which is why the collapse feeds itself. Each boiler raises the ceiling by 18.
@@ -169,6 +149,14 @@ The generator adds up to 66 on top of whatever the air is doing at its own cell,
 It burns one unit every four hours, plus another for every twenty citizens it has to warm and another for every boiler. Growth is paid for twice: once in timber, then forever in fuel.
 
 Sleeping under a roof cuts the bleed of body heat by 30%. It is shelter, not a stove. Once the fire is too low to warm the centre, citizens stop walking to it and go home instead.
+
+### A fire that is not the hearth
+
+A citizen who walks back to warmth instead of working loses hours, and the ballot's second tier counts them. Where those hours were walked decides what they buy. Hours lost all around the hearth ask for a bigger hearth, because a boiler holds the freezing line six cells further out for everyone; hours lost in one direction ask for a fire over there, because moving warmth only helps if there is somewhere to move it to. The vote is the decision and the site is arithmetic: a waystation goes to the middle of the walks that asked for one, each citizen weighing as many hours as they lost.
+
+It cannot go wherever it likes. A waystation is a brazier and a woodshed, and the shed is filled by haulers walking out to it, so a post further out than somebody can reach and come back from is a post that never burns. The site is drawn back along the line until it is one that can be fed, which means a chain of them cannot be laid in one reach: it grows a link at a time, each fire close enough to the last that the colony can supply it.
+
+Every shed short of wood claims one hauler -- the one standing nearest it -- and takes their load ahead of the hearth, out of the same surplus that pays for building and out of nothing else. One each is what makes a chain a standing tax that grows with its length rather than a levy that empties the hearth the moment a single post stands. A brazier burns its shed down on its own clock whether or not anybody is there, so keeping one lit is a cost the colony carries for as long as it wants the ground.
 
 ### Hauling
 
@@ -183,6 +171,18 @@ The colony works only ground somebody has stood in. A founding party knows the s
 A citizen picks which of the two to fetch by comparing each store against what the colony wants to hold per head, and keeps to that choice for the whole trip. They only change their mind when the other store has fallen a clear margin behind, because a round trip takes thirty-odd hours and a workforce that turns around every time a number crosses its target arrives too late in both directions. That margin is counted in hauls rather than units, so it widens as huts make each trip of game worth more: the slack a store gets is always about the same number of trips. The comparison is also made against what each store will hold once everyone already fetching that kind gets home, not against what is in it now, so a shortage pulls over as many haulers as it needs and no more.
 
 Wood goes on the fire. Game goes in the granary, and every hunter's hut standing means a carcass comes back dressed rather than dragged whole, so one haul is worth more.
+
+### Looking
+
+A colony spares a few hands for looking rather than working, and the qualification is having nothing the matter: a citizen the survival tier of the vote has nothing to say about is a citizen whose day the colony is not already spending. They set out from the furthest fire the colony keeps, which is what a chain of fires is for, and walk a leg at a time in a direction and a distance drawn from the world seed, and the distances are heavy-tailed -- half the legs are longer than twice the shortest, a tenth longer than ten times it, and the rare one runs a very long way. That shape is the search-theory answer for sparse targets worth coming back to; it is the mathematics that is borrowed and not the animal behaviour it was once argued from, because the tracks behind that argument turned out to be an artefact of the sensor.
+
+Nothing orders a scout home. What brings them back is the same leash every citizen carries: warmth's marks rise with every cell they put between themselves and the fire, so a scout turns for home when the walk back is all the warmth they have left, and no rule about expeditions had to be written to make that happen. A scout brings back the map and nothing else -- ground they have stood in becomes ground the colony can work, and the colony never unlearns it, even after the square itself is dropped from memory and drawn again.
+
+### Not coming back
+
+A citizen who stops being alive within the ground the colony works is dead, and the colony knows it. Past that ground nobody is watching, so what the colony learns is only that somebody did not come back, and the status line counts them as missing rather than as a death.
+
+There are two ways an absence stops being one. Somebody walks to the spot and finds them, which costs the colony the same trip that lost the first citizen -- so the next scout sent out walks towards the last place anybody was seen instead of a direction drawn from the seed. Or the colony gives up: after a year it raises a slab, which costs wood it could have burned, and a colony that cannot spare the wood keeps waiting, which is the honest version of not being able to afford to grieve. The slab itself is not built anywhere yet; where a reader could go and read it is the chronicle's business, and there is no chronicle.
 
 ### Building
 
