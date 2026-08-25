@@ -275,6 +275,17 @@ impl NeedKind {
 pub struct Need {
     pub level: f32,
     pub pressing: bool,
+    /// The worst this need has been since the last ballot. A hauler who bottomed
+    /// out at first light has not forgotten it by the time a vote is called, and
+    /// a ballot read off the instant would never hear from the cold at all.
+    pub worst: f32,
+}
+
+/// How far through its own tolerance band a need at `level` has fallen: zero at
+/// the mark where a citizen stops acting on it, one where they start.
+pub fn shortfall_of(kind: NeedKind, level: f32) -> f32 {
+    let rules = kind.rules();
+    (rules.high - level) / (rules.high - rules.low)
 }
 
 pub fn need_step(need: Need, kind: NeedKind, met: bool, decay_scale: f32) -> Need {
@@ -291,7 +302,11 @@ pub fn need_step(need: Need, kind: NeedKind, met: bool, decay_scale: f32) -> Nee
     } else {
         need.pressing
     };
-    Need { level, pressing }
+    Need {
+        level,
+        pressing,
+        worst: need.worst.max(shortfall_of(kind, level)),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -303,9 +318,12 @@ impl Needs {
         let mut needs = [Need {
             level: NEED_MAX,
             pressing: false,
+            worst: 0.0,
         }; NEED_COUNT];
         needs[NeedKind::Warmth as usize].level = START_WARMTH;
-        Needs(needs)
+        let mut needs = Needs(needs);
+        needs.forget_before_ballot();
+        needs
     }
 
     /// A founder. Everyone starting equally fed means everyone crossing the
@@ -317,6 +335,7 @@ impl Needs {
         let rules = NeedKind::Food.rules();
         let along = (index + 1) as f32 / of.max(1) as f32;
         needs.0[NeedKind::Food as usize].level = rules.low + along * (NEED_MAX - rules.low);
+        needs.forget_before_ballot();
         needs
     }
 
@@ -344,8 +363,15 @@ impl Needs {
     /// when it is worse than that. Bands differ per need, so this is what makes
     /// hunger and cold comparable at all.
     pub fn shortfall(&self, kind: NeedKind) -> f32 {
-        let rules = kind.rules();
-        (rules.high - self.level(kind)) / (rules.high - rules.low)
+        shortfall_of(kind, self.level(kind))
+    }
+
+    /// Draw a line under the season: from here the ballot remembers only what
+    /// happens next.
+    pub fn forget_before_ballot(&mut self) {
+        for kind in NEEDS {
+            self.0[kind as usize].worst = self.shortfall(kind);
+        }
     }
 
     pub fn comfortable(&self, kind: NeedKind) -> bool {
@@ -965,17 +991,18 @@ pub fn building_for(kind: NeedKind) -> Building {
     }
 }
 
-/// How one citizen votes: for whatever answers whichever of their needs has
-/// fallen furthest through its own band. Everybody has an opinion. The strict
-/// comparison keeps the first of any equals, so ties resolve in table order.
+/// How one citizen votes: for whatever answers whichever of their needs went
+/// worst since the last ballot, not whichever is worst at the moment it is
+/// called. Everybody has an opinion. The strict comparison keeps the first of
+/// any equals, so ties resolve in table order.
 pub fn vote_of(needs: &Needs) -> Building {
-    let mut worst = NEEDS[0];
+    let mut choice = NEEDS[0];
     for kind in NEEDS {
-        if needs.shortfall(kind) > needs.shortfall(worst) {
-            worst = kind;
+        if needs.get(kind).worst > needs.get(choice).worst {
+            choice = kind;
         }
     }
-    building_for(worst)
+    building_for(choice)
 }
 
 /// The ballot: one voice each, on top of whatever the mayor's office is
@@ -1185,7 +1212,7 @@ pub fn construction(
     calendar: Res<Calendar>,
     generator: Res<Generator>,
     structures: Query<(&Pos, &Structure)>,
-    citizens: Query<&Citizen>,
+    mut citizens: Query<&mut Citizen>,
 ) {
     council.construction.diverting =
         update_diverting(council.construction.diverting, generator.fuel);
@@ -1217,6 +1244,10 @@ pub fn construction(
     let tally = tally_votes(&people, &council.mayor);
     let building = next_project(tally, free_home(&beds, &homes).is_some());
     council.ballot.tally = tally;
+    // The ballot is counted, so the season it was counted over is over too.
+    for mut citizen in &mut citizens {
+        citizen.needs.forget_before_ballot();
+    }
     if let Some(pos) = next_plot(&taken) {
         council.construction.site = Some(Site {
             pos,
@@ -1446,11 +1477,21 @@ mod tests {
         Need {
             level,
             pressing: false,
+            worst: 0.0,
         }
     }
 
     fn set(needs: &mut Needs, kind: NeedKind, level: f32, pressing: bool) {
-        needs.0[kind as usize] = Need { level, pressing };
+        needs.0[kind as usize] = Need {
+            level,
+            pressing,
+            worst: shortfall_of(kind, level),
+        };
+    }
+
+    /// Move a need without touching what the ballot remembers of it.
+    fn drift(needs: &mut Needs, kind: NeedKind, level: f32) {
+        needs.0[kind as usize].level = level;
     }
 
     #[test]
@@ -1608,6 +1649,7 @@ mod tests {
             let latched = Need {
                 level: mid,
                 pressing: true,
+                worst: 0.0,
             };
             let tended = need_step(latched, kind, true, 1.0);
             assert!(
@@ -1619,7 +1661,8 @@ mod tests {
                 !need_step(
                     Need {
                         level: rules.high,
-                        pressing: true
+                        pressing: true,
+                        worst: 0.0
                     },
                     kind,
                     true,
@@ -3056,5 +3099,72 @@ mod tests {
         let ceiling = (population as f32 * MAX_DEPENDENT_SHARE) as usize;
         assert!(has_hands_to_spare(ceiling, population));
         assert!(!has_hands_to_spare(ceiling + 2, population));
+    }
+
+    #[test]
+    fn a_need_that_dipped_and_recovered_is_still_what_a_citizen_remembers() {
+        let kind = NeedKind::Warmth;
+        let mut need = need_at(kind.rules().high);
+        for _ in 0..40 {
+            need = need_step(need, kind, false, 1.0);
+        }
+        let bottom = need.worst;
+        assert!(bottom > 0.0, "a need that fell must leave a mark");
+        for _ in 0..200 {
+            need = need_step(need, kind, true, 1.0);
+        }
+        assert_eq!(need.level, NEED_MAX, "and it did recover");
+        assert_eq!(
+            need.worst, bottom,
+            "but the ballot remembers the worst of it, not the state it ended in"
+        );
+    }
+
+    #[test]
+    fn the_ballot_memory_starts_again_from_where_a_citizen_is_now() {
+        let mut needs = Needs::newcomer();
+        set(&mut needs, NeedKind::Warmth, 10.0, true);
+        assert!(needs.get(NeedKind::Warmth).worst > 1.0);
+        drift(&mut needs, NeedKind::Warmth, NEED_MAX);
+        needs.forget_before_ballot();
+        assert_eq!(
+            needs.get(NeedKind::Warmth).worst,
+            needs.shortfall(NeedKind::Warmth),
+            "after a ballot the memory holds nothing older than right now"
+        );
+    }
+
+    #[test]
+    fn a_citizen_votes_the_worst_it_has_had_rather_than_how_it_feels_now() {
+        let mut needs = Needs::newcomer();
+        for kind in NEEDS {
+            set(&mut needs, kind, kind.rules().high, false);
+        }
+        set(&mut needs, NeedKind::Warmth, 0.0, true);
+        drift(&mut needs, NeedKind::Warmth, NEED_MAX);
+        assert!(
+            needs.shortfall(NeedKind::Warmth) < needs.shortfall(NeedKind::Rest),
+            "on the instant, warmth is the least of this citizen's worries"
+        );
+        assert_eq!(
+            vote_of(&needs),
+            building_for(NeedKind::Warmth),
+            "but the ballot is about the worst of the season, not the moment"
+        );
+    }
+
+    #[test]
+    fn equally_remembered_needs_still_break_in_table_order() {
+        let mut needs = Needs::newcomer();
+        for kind in [NeedKind::Rest, NeedKind::Food] {
+            set(&mut needs, kind, kind.rules().low, true);
+        }
+        set(
+            &mut needs,
+            NeedKind::Warmth,
+            NeedKind::Warmth.rules().high,
+            false,
+        );
+        assert_eq!(vote_of(&needs), building_for(NeedKind::Rest));
     }
 }
