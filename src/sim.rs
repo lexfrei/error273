@@ -477,6 +477,16 @@ pub fn take_wood(forest: &mut Forest, cell: IVec2) {
 mod tests {
     use super::*;
 
+    /// Every plot the colony could ever build on, so invariants are checked
+    /// across the whole set rather than the first ring or two.
+    fn every_house_site() -> Vec<IVec2> {
+        (0usize..)
+            .map(house_site)
+            .take_while(Option::is_some)
+            .flatten()
+            .collect()
+    }
+
     #[test]
     fn heat_falls_off_with_distance() {
         let output = generator_output(FULL_BURN_FUEL);
@@ -586,8 +596,8 @@ mod tests {
 
     #[test]
     fn house_sites_are_distinct_and_fit_on_the_map() {
-        let sites: Vec<IVec2> = (0..40).filter_map(house_site).collect();
-        assert_eq!(sites.len(), 40, "40 houses must fit in the buildable rings");
+        let sites = every_house_site();
+        assert!(sites.len() >= 40, "the colony needs room to grow into");
         for (i, a) in sites.iter().enumerate() {
             assert!(a.x >= 0 && a.x <= R * 2 && a.y >= 0 && a.y <= R * 2);
             for b in &sites[i + 1..] {
@@ -599,7 +609,7 @@ mod tests {
     #[test]
     fn house_sites_never_cover_the_generator_or_the_forest() {
         let forest = forest_sites();
-        for site in (0..40).filter_map(house_site) {
+        for site in every_house_site() {
             assert_ne!(site, CENTER);
             assert!(
                 !forest.contains(&site),
@@ -756,11 +766,7 @@ mod tests {
 
     #[test]
     fn the_next_building_plot_runs_out_once_the_rings_are_built_out() {
-        let all: Vec<IVec2> = (0usize..)
-            .map(house_site)
-            .take_while(Option::is_some)
-            .flatten()
-            .collect();
+        let all = every_house_site();
         assert!(!all.is_empty());
         assert_eq!(next_house_site(&all), None);
     }
