@@ -1,5 +1,6 @@
 use crate::sim::{
-    ADULT_AGE, BUILDING_COUNT, BUILDINGS, Building, Calendar, FRAILTY_ONSET, couples, is_adult,
+    ADULT_AGE, BUILDING_COUNT, BUILDINGS, Building, Calendar, FRAILTY_ONSET, STAT_COUNT, STATS,
+    couples, is_adult,
 };
 
 pub const STATUS_LINES: usize = 4;
@@ -21,6 +22,9 @@ pub struct Status {
     pub project: Option<(Building, u32)>,
     pub tally: [f32; BUILDING_COUNT],
     pub ages: Vec<f32>,
+    /// The middle of the colony for each stat. An aggregate, not a reveal: what
+    /// any one citizen is stays hidden until the colony has watched them work.
+    pub stats: [f32; STAT_COUNT],
 }
 
 /// The four lines under the map, and the whole of what the headless build
@@ -76,13 +80,18 @@ pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
             votes.join("/")
         ),
         format!(
-            "under {:<2} {:3}  grown {:3}  over {:<2} {:3}  couples {:3}",
+            "under {:<2} {:3}  grown {:3}  over {:<2} {:3}  couples {:3}  raised {}",
             ADULT_AGE as u32,
             children,
             status.alive.saturating_sub(children + frail),
             FRAILTY_ONSET as u32,
             frail,
-            couples(&status.ages)
+            couples(&status.ages),
+            STATS
+                .into_iter()
+                .map(|stat| format!("{:.2}", status.stats[stat as usize]))
+                .collect::<Vec<String>>()
+                .join("/")
         ),
     ]
 }

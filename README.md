@@ -67,7 +67,7 @@ The map below is the window's glyph set; the four lines under it are exactly wha
 | `z` | a citizen asleep at home |
 | `.` | open ground |
 
-Four lines sit under the map. The first is the tick counter, the date it works out to, and the air outside the fire's reach. The second is the living population and the four quantities that decide the run: fuel in the generator, food in the granary, wood still standing, game still standing. The third counts what has been built, names the project in progress with how much timber it has swallowed so far, and gives the last ballot as votes for house, hut and boiler in that order. The fourth is the age pyramid -- children, grown citizens, the frail -- and how many couples the colony has.
+Four lines sit under the map. The first is the tick counter, the date it works out to, and the air outside the fire's reach. The second is the living population and the four quantities that decide the run: fuel in the generator, food in the granary, wood still standing, game still standing. The third counts what has been built, names the project in progress with how much timber it has swallowed so far, and gives the last ballot as votes for house, hut and boiler in that order. The fourth is the age pyramid -- children, grown citizens, the frail -- how many couples the colony has, and the middle of the colony for each of the three stats. That last is an aggregate and not a reveal: what any one citizen is stays hidden.
 
 ## Running it
 
@@ -163,6 +163,14 @@ The mayor's office is a weight per building type, added to the tally before it i
 A citizen ages one year for every year on the calendar, so the date on screen never contradicts anybody's age. Nobody dies of being old: hardiness is whole until about forty and then falls away towards a span of their own, scattered about a tenth either side of the expected one, and every night a citizen spends out in air below freezing rolls once against whatever hardiness they have left. Winter is what does the killing, it takes the frail first, and it takes them on ordinary working days rather than all at once at the end.
 
 Children are mouths, not hands. They answer their own needs -- they eat, they sleep, they come in from the cold -- but they do not haul, and they do not count towards the workforce a hauler is judging the stores against. How fast they grow up depends on how warm and well fed the colony is, so the shape of the age pyramid is an output of how the colony is doing rather than a number anybody set.
+
+### Who a citizen is
+
+Every citizen has three things the colony never prints a number for: strength, wits and hardiness. They are not rolled at birth. A child banks the warmth and the food the colony actually had, hour by hour, and that ledger is settled at four named ages -- two, six, eleven, and the day they are grown. The first years weigh most, because that is where a hungry childhood does its lasting damage, and the settlement is multiplicative: the same good year is worth more to a child who already has something to build on, and a bad start cannot be bought back at full price.
+
+What a body lost it can partly make back. Strength and hardiness keep a catch-up that runs out over the years after adulthood, so a colony can repair some of a cohort it half-starved; wits close on the day the child is grown and do not reopen. Each stat is raised on what actually feeds it -- the body eats, hardiness is warmed, wits take whatever there was of either.
+
+Two children of one good decade still come out different, because a share of who anybody turns out to be is not something the colony did or could have watched. Somebody who walks in already grown has only that share, since the colony never saw their childhood: that is what the founding party is made of.
 
 ### Growing
 

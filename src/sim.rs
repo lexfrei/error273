@@ -153,6 +153,31 @@ pub const UPGRADE_HEAT: f32 = 18.0;
 pub const BUILDING_COUNT: usize = 3;
 pub const CARGO_COUNT: usize = 2;
 pub const SEASON_DAYS: usize = DAYS_PER_SEASON as usize;
+
+// Stats are raised, not rolled. A childhood is banked hour by hour and settled
+// at named ages, heaviest at the start, and what the colony could not account
+// for survives as a residual rather than as the thing that decides anybody.
+pub const STAT_COUNT: usize = 3;
+pub const STAT_MIN: f32 = 0.05;
+pub const STAT_MAX: f32 = 0.95;
+/// A childhood exactly as good as the colony expects moves nothing.
+pub const FORMATION_NEUTRAL: f32 = 0.5;
+pub const MILESTONE_COUNT: usize = 4;
+/// The ages a childhood settles at. Four named steps rather than one hidden
+/// integral, so a child visibly becomes someone while the colony watches.
+pub const MILESTONE_AGES: [f32; MILESTONE_COUNT] = [2.0, 6.0, 11.0, ADULT_AGE];
+/// Heaviest on the first years, which is where the stunting window is.
+pub const MILESTONE_WEIGHTS: [f32; MILESTONE_COUNT] = [0.60, 0.35, 0.20, 0.10];
+// Checked where it cannot be skipped: the last milestone is the day a child
+// becomes a worker, and the last stage still counts for something.
+const _: () = assert!(MILESTONE_AGES[MILESTONE_COUNT - 1] == ADULT_AGE);
+const _: () = assert!(MILESTONE_WEIGHTS[MILESTONE_COUNT - 1] > 0.0);
+/// How far past adulthood a body can still make some of a bad childhood back.
+pub const CATCHUP_UNTIL: f32 = 20.0;
+pub const CATCHUP_WEIGHT: f32 = 0.12;
+/// How far either side of the middle the part nobody can account for reaches.
+pub const RESIDUAL_SPREAD: f32 = 0.25;
+pub const STAT_SALT: u64 = 0x51;
 // How much more than it spends a colony must be able to fetch before it takes
 // on another mouth. The rate it is judged on is a season's average, and the
 // season that binds is the one that puts nothing back, so this margin is the
@@ -217,6 +242,156 @@ pub const HAUL_SWITCH_MAX: f32 = 0.35;
 // Every block of citizens the generator has to warm costs another log per cycle,
 // so growth is paid for twice: once in timber, then forever in fuel.
 pub const POP_PER_EXTRA_BURN: usize = 20;
+
+/// What a colony raises in a citizen. Hidden: the card prints a word, never a
+/// number, and only once the colony has watched enough work to have an opinion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stat {
+    Strength,
+    Wits,
+    Hardiness,
+}
+
+pub const STATS: [Stat; STAT_COUNT] = [Stat::Strength, Stat::Wits, Stat::Hardiness];
+
+/// Whether a stat can still be made up after adulthood. The physical deficit of
+/// a hungry childhood partly recovers and the cognitive one does not, which is
+/// the whole reason the colony has two different kinds of stat to raise.
+pub fn catches_up(stat: Stat) -> bool {
+    !matches!(stat, Stat::Wits)
+}
+
+/// What a stat is raised on: the body eats, hardiness is warmed, and wits take
+/// whatever the household had of either.
+pub fn provision_for(stat: Stat, warmth: f32, food: f32) -> f32 {
+    match stat {
+        Stat::Strength => food,
+        Stat::Hardiness => warmth,
+        Stat::Wits => (warmth + food) / 2.0,
+    }
+}
+
+/// What one stage of a childhood does to a stat. Multiplicative on purpose: the
+/// same good year is worth more to a child who already has something to build
+/// on, and a bad start cannot be bought back at full price.
+pub fn milestone_step(stock: f32, provision: f32, weight: f32) -> f32 {
+    let gain = (provision - FORMATION_NEUTRAL) * weight;
+    (stock * (1.0 + gain)).clamp(STAT_MIN, STAT_MAX)
+}
+
+/// The part of a citizen the colony cannot account for. The literature is clear
+/// that this share is large and unsystematic, so it is a residual rather than a
+/// hidden input anybody could aim at.
+fn residual(seed: u64, stat: Stat) -> f32 {
+    let roll = noise(seed, STAT_SALT.wrapping_add(stat as u64));
+    (FORMATION_NEUTRAL + (roll - 0.5) * 2.0 * RESIDUAL_SPREAD).clamp(STAT_MIN, STAT_MAX)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Stats([f32; STAT_COUNT]);
+
+impl Stats {
+    pub fn of(&self, stat: Stat) -> f32 {
+        self.0[stat as usize]
+    }
+
+    /// Somebody who walked in already grown. The colony never saw their
+    /// childhood, so the residual is the whole of what it has to go on -- which
+    /// is the honest rule for the founding party and for anyone who arrives.
+    pub fn migrant(seed: u64) -> Stats {
+        let mut stats = [0.0; STAT_COUNT];
+        for stat in STATS {
+            stats[stat as usize] = residual(seed, stat);
+        }
+        Stats(stats)
+    }
+}
+
+/// A childhood in progress: what the colony had to give, banked hour by hour
+/// and settled at the milestone ages.
+#[derive(Debug, Clone, Copy)]
+pub struct Upbringing {
+    stock: [f32; STAT_COUNT],
+    warmth: f32,
+    food: f32,
+    hours: f32,
+    settled: usize,
+}
+
+impl Upbringing {
+    /// A newborn starts from the residual and is raised from there.
+    pub fn born(seed: u64) -> Upbringing {
+        Upbringing {
+            stock: Stats::migrant(seed).0,
+            warmth: 0.0,
+            food: 0.0,
+            hours: 0.0,
+            settled: 0,
+        }
+    }
+
+    /// Somebody who arrived grown: nothing left to settle.
+    pub fn grown(seed: u64) -> Upbringing {
+        Upbringing {
+            settled: MILESTONE_COUNT,
+            ..Upbringing::born(seed)
+        }
+    }
+
+    pub fn stats(&self) -> Stats {
+        Stats(self.stock)
+    }
+
+    /// One hour of childhood, banked.
+    pub fn observe(&mut self, warmth: f32, food: f32) {
+        self.warmth += warmth;
+        self.food += food;
+        self.hours += 1.0;
+    }
+
+    /// Settle every milestone the child has reached, on the given stage.
+    pub fn resolve(&mut self, age: f32, warmth: f32, food: f32) {
+        while self.settled < MILESTONE_COUNT && age >= MILESTONE_AGES[self.settled] {
+            let weight = MILESTONE_WEIGHTS[self.settled];
+            for stat in STATS {
+                let provision = provision_for(stat, warmth, food);
+                self.stock[stat as usize] =
+                    milestone_step(self.stock[stat as usize], provision, weight);
+            }
+            self.settled += 1;
+        }
+    }
+
+    /// Settle on what has actually been banked since the last milestone, and
+    /// start the next stage's ledger clean.
+    pub fn settle_due(&mut self, age: f32) {
+        if self.settled >= MILESTONE_COUNT || age < MILESTONE_AGES[self.settled] {
+            return;
+        }
+        let hours = self.hours.max(1.0);
+        self.resolve(age, self.warmth / hours, self.food / hours);
+        self.warmth = 0.0;
+        self.food = 0.0;
+        self.hours = 0.0;
+    }
+
+    /// What a good adolescence can still buy back, diminishing with every year
+    /// past adulthood until it is gone.
+    pub fn catch_up(&mut self, age: f32, warmth: f32, food: f32) {
+        if age < ADULT_AGE || age >= CATCHUP_UNTIL {
+            return;
+        }
+        let left = (CATCHUP_UNTIL - age) / (CATCHUP_UNTIL - ADULT_AGE);
+        for stat in STATS.into_iter().filter(|stat| catches_up(*stat)) {
+            let provision = provision_for(stat, warmth, food);
+            self.stock[stat as usize] = milestone_step(
+                self.stock[stat as usize],
+                provision,
+                CATCHUP_WEIGHT * left * per_year(1.0),
+            );
+        }
+    }
+}
 
 /// What a citizen can be short of. Systems walk `NEEDS` rather than naming
 /// these one at a time, so a fourth need costs one table entry.
@@ -609,6 +784,8 @@ impl Built {
 #[derive(Component)]
 pub struct Citizen {
     pub needs: Needs,
+    /// What the colony has raised in them, and what it started from.
+    pub upbringing: Upbringing,
     /// Years lived, on the same clock the calendar prints.
     pub age: f32,
     /// The span this one would reach if nothing got them first.
@@ -1283,6 +1460,7 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
             Pos(ring_pos(START_RING, angle)),
             Citizen {
                 needs: Needs::founder(i, CITIZENS),
+                upbringing: Upbringing::grown(seed),
                 age: founder_age(i, CITIZENS),
                 lifespan: lifespan_of(seed),
                 seed,
@@ -1310,6 +1488,8 @@ pub fn aging(mut citizens: Query<&mut Citizen>) {
         shares[NeedKind::Warmth as usize],
         shares[NeedKind::Food as usize],
     );
+    let warmth = shares[NeedKind::Warmth as usize];
+    let food = shares[NeedKind::Food as usize];
     for mut citizen in &mut citizens {
         let rate = if is_adult(citizen.age) {
             1.0
@@ -1317,7 +1497,23 @@ pub fn aging(mut citizens: Query<&mut Citizen>) {
             growing_up
         };
         citizen.age += per_year(rate);
+        if !is_adult(citizen.age) {
+            citizen.upbringing.observe(warmth, food);
+        }
+        let age = citizen.age;
+        citizen.upbringing.settle_due(age);
+        citizen.upbringing.catch_up(age, warmth, food);
     }
+}
+
+/// The middle of a colony, which is what one citizen's stat is read against.
+/// Sorts in place because the caller owns the scratch and nobody else wants it.
+pub fn median(values: &mut [f32]) -> f32 {
+    if values.is_empty() {
+        return FORMATION_NEUTRAL;
+    }
+    values.sort_by(f32::total_cmp);
+    values[values.len() / 2]
 }
 
 pub fn advance_calendar(tick: Res<Tick>, mut calendar: ResMut<Calendar>) {
@@ -1521,6 +1717,7 @@ pub fn colony_growth(
             Pos(CENTER),
             Citizen {
                 needs: Needs::newcomer(),
+                upbringing: Upbringing::born(seed),
                 age: 0.0,
                 lifespan: lifespan_of(seed),
                 seed,
@@ -3563,5 +3760,230 @@ mod tests {
             can_afford_a_mouth(hands, per_hand, 30, 0),
             "but the colony it started as was well within itself"
         );
+    }
+
+    #[test]
+    fn the_milestones_are_named_in_order_and_end_at_adulthood() {
+        let mut previous = 0.0;
+        for (stage, age) in MILESTONE_AGES.into_iter().enumerate() {
+            assert!(
+                age > previous,
+                "milestone {stage} does not come after the last"
+            );
+            previous = age;
+        }
+    }
+
+    #[test]
+    fn the_early_years_weigh_heaviest() {
+        let mut previous = f32::MAX;
+        for (stage, weight) in MILESTONE_WEIGHTS.into_iter().enumerate() {
+            assert!(
+                weight < previous,
+                "stage {stage} weighs at least as much as the one before it"
+            );
+            previous = weight;
+        }
+    }
+
+    #[test]
+    fn a_stage_of_plenty_raises_a_stat_and_a_stage_of_want_lowers_it() {
+        let middling = 0.5;
+        assert!(milestone_step(middling, 1.0, MILESTONE_WEIGHTS[0]) > middling);
+        assert!(milestone_step(middling, 0.0, MILESTONE_WEIGHTS[0]) < middling);
+        assert_eq!(
+            milestone_step(middling, FORMATION_NEUTRAL, MILESTONE_WEIGHTS[0]),
+            middling,
+            "a childhood exactly as good as expected changes nothing"
+        );
+    }
+
+    #[test]
+    fn the_same_good_year_is_worth_more_to_a_child_who_already_has_something() {
+        let poor = 0.3;
+        let rich = 0.7;
+        let gained = |stock: f32| milestone_step(stock, 1.0, MILESTONE_WEIGHTS[1]) - stock;
+        assert!(
+            gained(rich) > gained(poor),
+            "investment complements the stock it lands on, it does not substitute for it"
+        );
+    }
+
+    #[test]
+    fn a_bad_start_cannot_be_bought_back_at_full_price() {
+        let steady = 0.5;
+        let starved_then_fed = {
+            let after_famine = milestone_step(steady, 0.0, MILESTONE_WEIGHTS[0]);
+            milestone_step(after_famine, 1.0, MILESTONE_WEIGHTS[1])
+        };
+        let fed_then_starved = {
+            let after_plenty = milestone_step(steady, 1.0, MILESTONE_WEIGHTS[0]);
+            milestone_step(after_plenty, 0.0, MILESTONE_WEIGHTS[1])
+        };
+        assert!(
+            starved_then_fed < fed_then_starved,
+            "the same two years in the other order do not come out the same"
+        );
+    }
+
+    #[test]
+    fn a_stat_never_leaves_its_range() {
+        let mut stock = 0.5;
+        for _ in 0..50 {
+            stock = milestone_step(stock, 1.0, MILESTONE_WEIGHTS[0]);
+        }
+        assert!(stock <= STAT_MAX);
+        let mut stock = 0.5;
+        for _ in 0..50 {
+            stock = milestone_step(stock, 0.0, MILESTONE_WEIGHTS[0]);
+        }
+        assert!(stock >= STAT_MIN);
+    }
+
+    #[test]
+    fn each_stat_is_raised_on_what_actually_feeds_it() {
+        assert_eq!(
+            provision_for(Stat::Strength, 0.2, 0.9),
+            0.9,
+            "the body eats"
+        );
+        assert_eq!(
+            provision_for(Stat::Hardiness, 0.2, 0.9),
+            0.2,
+            "and is warmed"
+        );
+        let both = provision_for(Stat::Wits, 0.2, 0.9);
+        assert!(
+            both > 0.2 && both < 0.9,
+            "wits take whatever the household had of either"
+        );
+    }
+
+    #[test]
+    fn the_body_keeps_growing_after_adulthood_and_the_mind_does_not() {
+        assert!(catches_up(Stat::Strength));
+        assert!(catches_up(Stat::Hardiness));
+        assert!(
+            !catches_up(Stat::Wits),
+            "the physical deficit partly recovers and the cognitive one does not"
+        );
+    }
+
+    #[test]
+    fn a_founder_is_the_residual_and_nothing_else() {
+        let a = Stats::migrant(1);
+        let b = Stats::migrant(2);
+        for stat in STATS {
+            assert!(a.of(stat) >= STAT_MIN && a.of(stat) <= STAT_MAX);
+        }
+        assert!(
+            STATS.into_iter().any(|stat| a.of(stat) != b.of(stat)),
+            "two people who walked in out of the cold are not the same person"
+        );
+    }
+
+    #[test]
+    fn two_children_of_one_childhood_still_differ() {
+        let raised = |seed| {
+            let mut childhood = Upbringing::born(seed);
+            for age in MILESTONE_AGES {
+                childhood.resolve(age, 0.8, 0.8);
+            }
+            childhood.stats()
+        };
+        let one = raised(11);
+        let other = raised(12);
+        assert!(
+            STATS.into_iter().any(|stat| one.of(stat) != other.of(stat)),
+            "the residual is what keeps siblings from being clones"
+        );
+    }
+
+    #[test]
+    fn a_childhood_of_plenty_beats_a_childhood_of_want() {
+        let raised = |provision: f32| {
+            let mut childhood = Upbringing::born(7);
+            for age in MILESTONE_AGES {
+                childhood.resolve(age, provision, provision);
+            }
+            childhood.stats()
+        };
+        let fat = raised(1.0);
+        let lean = raised(0.0);
+        for stat in STATS {
+            assert!(
+                fat.of(stat) > lean.of(stat),
+                "{stat:?} did not come out ahead on a childhood twice as good"
+            );
+        }
+    }
+
+    #[test]
+    fn a_milestone_is_only_ever_resolved_once() {
+        let mut childhood = Upbringing::born(3);
+        childhood.resolve(MILESTONE_AGES[0], 1.0, 1.0);
+        let after_one = childhood.stats();
+        childhood.resolve(MILESTONE_AGES[0] - 0.1, 1.0, 1.0);
+        assert_eq!(
+            childhood.stats().of(Stat::Wits),
+            after_one.of(Stat::Wits),
+            "a birthday does not come round twice"
+        );
+    }
+
+    #[test]
+    fn the_middle_of_a_colony_is_the_middle_of_what_it_has() {
+        assert_eq!(
+            median(&mut []),
+            FORMATION_NEUTRAL,
+            "an empty colony is unremarkable"
+        );
+        assert_eq!(median(&mut [0.4]), 0.4);
+        assert_eq!(
+            median(&mut [0.9, 0.1, 0.5]),
+            0.5,
+            "and order does not matter"
+        );
+    }
+
+    #[test]
+    fn a_good_adolescence_buys_back_the_body_and_not_the_mind() {
+        let starved = || {
+            let mut childhood = Upbringing::born(5);
+            for age in MILESTONE_AGES {
+                childhood.resolve(age, 0.0, 0.0);
+            }
+            childhood
+        };
+        let before = starved().stats();
+        let mut repaired = starved();
+        for _ in 0..(ticks_per_year() * 3) {
+            repaired.catch_up(ADULT_AGE + 1.0, 1.0, 1.0);
+        }
+        let after = repaired.stats();
+        assert!(after.of(Stat::Strength) > before.of(Stat::Strength));
+        assert!(after.of(Stat::Hardiness) > before.of(Stat::Hardiness));
+        assert_eq!(
+            after.of(Stat::Wits),
+            before.of(Stat::Wits),
+            "no amount of later plenty reopens a mind that closed at adulthood"
+        );
+    }
+
+    #[test]
+    fn the_catch_up_runs_out_with_the_years() {
+        let gained = |age: f32| {
+            let mut childhood = Upbringing::born(5);
+            for age in MILESTONE_AGES {
+                childhood.resolve(age, 0.0, 0.0);
+            }
+            let before = childhood.stats().of(Stat::Strength);
+            for _ in 0..ticks_per_year() {
+                childhood.catch_up(age, 1.0, 1.0);
+            }
+            childhood.stats().of(Stat::Strength) - before
+        };
+        assert!(gained(ADULT_AGE + 1.0) > gained(CATCHUP_UNTIL - 1.0));
+        assert_eq!(gained(CATCHUP_UNTIL), 0.0, "and then it is over");
     }
 }

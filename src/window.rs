@@ -13,7 +13,7 @@ use bevy::window::WindowResolution;
 
 use crate::sim::{
     Air, BUILDINGS, Ballot, Building, CENTER, Cargo, Citizen, Construction, GENERATOR_HEAT,
-    NeedKind, Outside, Pos, R, Stores, Structure,
+    NeedKind, Outside, Pos, R, STAT_COUNT, STATS, Stores, Structure, median,
 };
 use crate::status::{STATUS_LINES, Status, status_lines};
 
@@ -229,6 +229,14 @@ fn paint_status(
         buildings[structure.0 as usize] += 1;
     }
     let ages: Vec<f32> = citizens.iter().map(|citizen| citizen.age).collect();
+    let mut stats = [0.0; STAT_COUNT];
+    for stat in STATS {
+        let mut held: Vec<f32> = citizens
+            .iter()
+            .map(|citizen| citizen.upbringing.stats().of(stat))
+            .collect();
+        stats[stat as usize] = median(&mut held);
+    }
     let status = Status {
         tick: outside.tick.0,
         calendar: *outside.calendar,
@@ -245,6 +253,7 @@ fn paint_status(
             .map(|site| (site.building, site.delivered)),
         tally: ballot.tally,
         ages,
+        stats,
     };
     let painted = status_lines(&status);
     for (line, mut text) in &mut lines {

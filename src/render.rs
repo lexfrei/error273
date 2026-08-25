@@ -4,7 +4,10 @@
 
 use bevy::prelude::*;
 
-use crate::sim::{BUILDINGS, Ballot, Cargo, Citizen, Construction, Outside, Stores, Structure};
+use crate::sim::{
+    BUILDINGS, Ballot, Cargo, Citizen, Construction, Outside, STAT_COUNT, STATS, Stores, Structure,
+    median,
+};
 use crate::status::{Status, status_lines};
 
 pub fn print_status(
@@ -29,6 +32,14 @@ pub fn print_status(
         buildings[structure.0 as usize] += 1;
     }
     let ages: Vec<f32> = citizens.iter().map(|citizen| citizen.age).collect();
+    let mut stats = [0.0; STAT_COUNT];
+    for stat in STATS {
+        let mut held: Vec<f32> = citizens
+            .iter()
+            .map(|citizen| citizen.upbringing.stats().of(stat))
+            .collect();
+        stats[stat as usize] = median(&mut held);
+    }
     let status = Status {
         tick: outside.tick.0,
         calendar: *outside.calendar,
@@ -45,6 +56,7 @@ pub fn print_status(
             .map(|site| (site.building, site.delivered)),
         tally: ballot.tally,
         ages,
+        stats,
     };
     for line in status_lines(&status) {
         println!("{line}");
