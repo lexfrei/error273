@@ -215,6 +215,10 @@ pub const WORLD_CELLS_HELD: usize = 1 << 20;
 pub fn world_is_bounded(chunks_held: usize) -> bool {
     chunks_held * (CHUNK * CHUNK) as usize <= WORLD_CELLS_HELD
 }
+/// What a walk counts as when there is no work of that kind anywhere in reach.
+/// It is the longest walk there is, so a spare hand who found nothing never
+/// scores better than one who found work at the end of the world.
+pub const WALK_UNFOUND: i32 = SEARCH_RADII[SEARCH_RADII.len() - 1];
 /// The seed the world is generated from. One number, fixed, so a run replays.
 pub const WORLD_SEED: u64 = 0x2026;
 
@@ -2344,9 +2348,7 @@ pub fn assign_trades(
             .enumerate()
             .map(|(index, (_, at, experience))| {
                 let walk = gather_source(&mut patches, short, *at, false)
-                    .map_or(SEARCH_RADII[0], |(cell, _)| {
-                        (cell - *at).abs().max_element()
-                    });
+                    .map_or(WALK_UNFOUND, |(cell, _)| (cell - *at).abs().max_element());
                 (index, assignment_score(walk, *experience, bias))
             })
             .collect();
@@ -5779,5 +5781,18 @@ mod tests {
             CENTER - IVec2::new(0, VIEW_RADIUS + 40),
         ];
         assert_eq!(out.iter().filter(|cell| !on_frame(**cell)).count(), 2);
+    }
+
+    #[test]
+    fn a_hand_who_found_no_work_never_outscores_one_who_found_it_far_away() {
+        let furthest = SEARCH_RADII[SEARCH_RADII.len() - 1];
+        assert!(
+            WALK_UNFOUND >= furthest,
+            "not finding work has to count as at least the longest walk there is"
+        );
+        assert!(
+            assignment_score(WALK_UNFOUND, 0.5, 0.0) <= assignment_score(furthest, 0.5, 0.0),
+            "a spare hand with nowhere to go must not be the best candidate"
+        );
     }
 }
