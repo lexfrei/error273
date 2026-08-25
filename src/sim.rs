@@ -190,6 +190,21 @@ pub const FOUNDING_REACH: i32 = 1;
 pub const SEARCH_RADII: [i32; 3] = [24, 64, RICHNESS_BEST];
 /// How far around a citizen the world is kept in memory between seasons.
 pub const FORGET_BEYOND: i32 = SEARCH_RADII[1];
+/// The most of the world the colony may be holding at once, in cells. It is a
+/// ceiling on memory, not on where anybody can walk: a colony that keeps moving
+/// draws chunks as it goes and drops the ones behind it, so what it holds has
+/// to follow where it is standing rather than how long it has been running.
+#[cfg(not(feature = "window"))]
+pub const WORLD_CELLS_HELD: usize = 1 << 20;
+
+/// Whether that ceiling is being kept. The headless build checks it every tick,
+/// which is the only place it is checked: it is an instrument reading, and a
+/// simulation that policed its own memory would be able to hide a leak by
+/// quietly forgetting more.
+#[cfg(not(feature = "window"))]
+pub fn world_is_bounded(chunks_held: usize) -> bool {
+    chunks_held * (CHUNK * CHUNK) as usize <= WORLD_CELLS_HELD
+}
 /// The seed the world is generated from. One number, fixed, so a run replays.
 pub const WORLD_SEED: u64 = 0x2026;
 
@@ -5684,5 +5699,39 @@ mod tests {
             SEARCH_RADII[SEARCH_RADII.len() - 1] == RICHNESS_BEST,
             "the widest ring is where the ground stops getting better for the walk"
         );
+    }
+
+    #[cfg(not(feature = "window"))]
+    #[test]
+    fn the_bound_is_a_number_of_cells_and_not_a_number_of_chunks() {
+        let chunks = WORLD_CELLS_HELD / (CHUNK * CHUNK) as usize;
+        assert!(
+            world_is_bounded(chunks),
+            "the ceiling itself must be allowed"
+        );
+        assert!(
+            !world_is_bounded(chunks + 1),
+            "and one chunk past it must not be"
+        );
+    }
+
+    #[cfg(not(feature = "window"))]
+    #[test]
+    fn the_world_a_wandering_colony_holds_stays_bounded() {
+        let mut world = Patches::new(WORLD_SEED);
+        let furthest = SEARCH_RADII[SEARCH_RADII.len() - 1];
+        // A colony that keeps walking, drawing the world as it goes and never
+        // coming back. What it holds must follow where it stands, not how far
+        // it has been.
+        for step in 1..60 {
+            let out = CENTER + IVec2::splat(step * furthest);
+            let _ = world.reach(out, furthest).count();
+            world.forget_beyond(&[out], FORGET_BEYOND);
+            assert!(
+                world_is_bounded(world.realised()),
+                "{} chunks held after {step} moves",
+                world.realised()
+            );
+        }
     }
 }

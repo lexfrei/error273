@@ -5,10 +5,20 @@
 use bevy::prelude::*;
 
 use crate::sim::{
-    BUILDINGS, Cargo, Citizen, Regard, STAT_COUNT, STATS, Structure, estimate, is_known, median,
-    regard_of,
+    BUILDINGS, Cargo, Citizen, Patches, Regard, STAT_COUNT, STATS, Structure, estimate, is_known,
+    median, regard_of, world_is_bounded,
 };
 use crate::status::{CitizenCard, Readings, Status, status_lines};
+
+/// The memory ceiling, checked where the gates can see it fail. This is the
+/// headless build's business and not the simulation's -- see `world_is_bounded`.
+pub fn hold_the_world_bound(patches: Res<Patches>) {
+    assert!(
+        world_is_bounded(patches.realised()),
+        "the colony is holding {} chunks of world, past the ceiling",
+        patches.realised()
+    );
+}
 
 pub fn print_status(readings: Readings, structures: Query<&Structure>, citizens: Query<&Citizen>) {
     let mut buildings = [0usize; BUILDINGS.len()];

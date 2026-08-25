@@ -63,7 +63,10 @@ fn main() {
                 .chain(),
         );
     #[cfg(not(feature = "window"))]
-    app.add_systems(SimSchedule, render::print_status.after(sim::burn_fuel));
+    app.add_systems(
+        SimSchedule,
+        (render::hold_the_world_bound, render::print_status).after(sim::burn_fuel),
+    );
     app.run();
 }
 
