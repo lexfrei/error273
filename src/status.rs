@@ -203,7 +203,7 @@ fn stat_word(stat: crate::sim::Stat) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::{MOOD_BASE, calendar_at};
+    use crate::sim::{MOOD_BASE, MOOD_MAX, calendar_at};
 
     /// The page carries a sample of these lines, and a sample is a copy that
     /// nothing keeps in step. Three times now a reading has been added here and
@@ -247,16 +247,38 @@ mod tests {
                 hardship: Hardship::Untouched,
             }),
         };
-        for line in status_lines(&shown) {
-            for word in line.split_whitespace() {
-                if !word.chars().all(|c| c.is_ascii_lowercase()) {
-                    continue;
-                }
-                assert!(
-                    sample.contains(word),
-                    "the page's sample never says `{word}`, so it is showing an older build"
-                );
-            }
+        // Only the words the format itself puts there, never the ones that came
+        // from the data: a sample catches whichever citizen it catches, and
+        // requiring it to say `focused` would fail the day it catches somebody
+        // distracted. What the two differ in is data; what they share is label.
+        let words = |status: &Status| -> Vec<String> {
+            status_lines(status)
+                .into_iter()
+                .flat_map(|line| {
+                    line.split_whitespace()
+                        .filter(|word| word.chars().all(|c| c.is_ascii_lowercase()))
+                        .map(str::to_string)
+                        .collect::<Vec<String>>()
+                })
+                .collect()
+        };
+        let mut other = Status {
+            ages: shown.ages.clone(),
+            card: shown.card.as_ref().map(|card| CitizenCard {
+                focus: Focus::BadlyDistracted,
+                held: [false; THOUGHT_COUNT],
+                hardship: Hardship::Broken,
+                ..*card
+            }),
+            ..shown
+        };
+        other.mood = MOOD_MAX;
+        let shared = words(&other);
+        for word in words(&shown).into_iter().filter(|w| shared.contains(w)) {
+            assert!(
+                sample.contains(&word),
+                "the page's sample never says `{word}`, so it is showing an older build"
+            );
         }
     }
 }
