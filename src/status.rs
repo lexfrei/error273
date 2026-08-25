@@ -220,9 +220,14 @@ mod tests {
     #[test]
     fn the_page_shows_every_reading_the_build_prints() {
         let page = include_str!("../README.md");
+        // To the closing fence and no further. Splitting on the opening one and
+        // taking what follows hands back the whole rest of the page, prose and
+        // all, so a word can be found in an unrelated sentence and the check
+        // passes on a sample that has not said it for two changes.
         let sample = page
             .split("```text")
             .nth(1)
+            .and_then(|rest| rest.split("```").next())
             .expect("the page has a sample of a run in it");
         let shown = Status {
             tick: 0,
@@ -271,6 +276,10 @@ mod tests {
         };
         let mut other = Status {
             ages: shown.ages.clone(),
+            // Different data everywhere data can differ, including the branches
+            // a format takes: `project` says either a building or `none`, and
+            // which one a sample caught is not a label.
+            project: Some((Building::House, 3)),
             card: shown.card.as_ref().map(|card| CitizenCard {
                 focus: Focus::BadlyDistracted,
                 held: [false; THOUGHT_COUNT],
