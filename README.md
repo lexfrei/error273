@@ -94,6 +94,14 @@ ERROR273_TURBO=1 cargo run --no-default-features
 
 Same again with the wait between ticks dropped, so it runs as fast as the machine will go. A citizen takes fifteen game years to grow up and a life is about fifty-five; at eighty milliseconds a tick that is hours, and here it is minutes.
 
+### The tempo
+
+```bash
+ERROR273_TICK_MS=40 cargo run
+```
+
+How long a tick lasts in real time, in milliseconds, default 80 and held inside a sane range. It changes only how fast you watch: a tick is one game hour whatever it is set to, and nothing in the simulation is measured against the wall. Ticks fall on an absolute grid -- the nth tick is due n steps after the colony was founded -- so a slow frame is made up rather than pushing everything after it late.
+
 ```bash
 cargo test
 ```

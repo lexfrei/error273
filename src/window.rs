@@ -6,8 +6,6 @@
 //! components the terminal renderer reads, and the sim runs on the same fixed
 //! 80 ms step it runs on headless.
 
-use std::time::Duration;
-
 use bevy::camera::ScalingMode;
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
@@ -18,10 +16,6 @@ use crate::sim::{
     NeedKind, Outside, Pos, R, Stores, Structure,
 };
 use crate::status::{STATUS_LINES, Status, status_lines};
-
-/// Matches the step the headless build gives `ScheduleRunnerPlugin`, so the
-/// colony lives at the same speed whichever renderer is watching it.
-const STEP: Duration = Duration::from_millis(80);
 
 /// Compiled in rather than loaded from `assets/`, so the binary draws the same
 /// map wherever it is run from.
@@ -103,7 +97,10 @@ impl Plugin for WindowRendererPlugin {
             ..default()
         }))
         .insert_resource(ClearColor(VOID))
-        .insert_resource(Time::<Fixed>::from_duration(STEP))
+        // `Time<Fixed>` accumulates real time and runs the fixed schedule as many
+        // times as fit, so a slow frame is made up rather than lost. All the
+        // window needs from the tempo knob is the step itself.
+        .insert_resource(Time::<Fixed>::from_duration(crate::tempo::tick_step()))
         .add_systems(Startup, spawn_board)
         .add_systems(FixedPostUpdate, (paint_map, paint_status));
     }
