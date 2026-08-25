@@ -143,9 +143,9 @@ pub const GROWTH_SHARE: f32 = 0.6;
 // judges to be the shorter one.
 pub const FUEL_PER_CITIZEN: f32 = 1.3;
 pub const FOOD_PER_CITIZEN: f32 = 0.6;
-// Deadband on the haul decision: how far behind the other store has to fall,
-// in shares of its target, before a hauler changes what they are fetching.
-pub const HAUL_SWITCH_MARGIN: f32 = 0.25;
+// Deadband on the haul decision, counted in hauls rather than units: how many
+// trips of slack the other store gets before a hauler changes what they fetch.
+pub const HAUL_SWITCH_HAULS: f32 = 4.0;
 // Every block of citizens the generator has to warm costs another log per cycle,
 // so growth is paid for twice: once in timber, then forever in fuel.
 pub const POP_PER_EXTRA_BURN: usize = 20;
@@ -532,17 +532,26 @@ pub fn stock_share(stock: u32, per_head: f32, population: usize) -> f32 {
     stock as f32 / (population as f32 * per_head).max(1.0)
 }
 
+/// How far behind the other store has to fall before a hauler changes what they
+/// fetch. Sized in hauls, not units: a hut makes each trip of game worth more,
+/// so the same number of units is a bigger swing, and a band that did not widen
+/// with it would have the workforce overshoot on every correction.
+pub fn haul_switch_margin(population: usize, huts: usize) -> f32 {
+    let per_haul = food_yield(huts) as f32 / (population as f32 * FOOD_PER_CITIZEN).max(1.0);
+    HAUL_SWITCH_HAULS * per_haul
+}
+
 /// Which store a hauler works next. They keep to the kind they were on until
 /// the other store has fallen a clear margin behind, so a stockpile crossing
 /// its target does not swing the whole workforce round at once.
-pub fn haul_choice(current: Cargo, fuel: u32, food: u32, population: usize) -> Cargo {
+pub fn haul_choice(current: Cargo, fuel: u32, food: u32, population: usize, huts: usize) -> Cargo {
     let wood = stock_share(fuel, FUEL_PER_CITIZEN, population);
     let game = stock_share(food, FOOD_PER_CITIZEN, population);
     let (working, other) = match current {
         Cargo::Wood => (wood, game),
         Cargo::Food => (game, wood),
     };
-    if other + HAUL_SWITCH_MARGIN < working {
+    if other + haul_switch_margin(population, huts) < working {
         current.other()
     } else {
         current
@@ -849,6 +858,7 @@ pub fn construction(
 pub fn colony_growth(
     mut commands: Commands,
     tick: Res<Tick>,
+    built: Res<Built>,
     generator: Res<Generator>,
     granary: Res<Granary>,
     houses: Query<(&Pos, &Structure)>,
@@ -876,7 +886,13 @@ pub fn colony_growth(
             needs: Needs::newcomer(),
             home,
             carrying: None,
-            hauling: haul_choice(Cargo::Wood, generator.fuel, granary.food, people.len()),
+            hauling: haul_choice(
+                Cargo::Wood,
+                generator.fuel,
+                granary.food,
+                people.len(),
+                built.of(Building::HuntersHut),
+            ),
         },
     ));
 }
@@ -938,8 +954,13 @@ pub fn citizen_ai(
                     (Cargo::Food, _) => granary.food += food_yield(built.of(Building::HuntersHut)),
                 }
                 citizen.carrying = None;
-                citizen.hauling =
-                    haul_choice(citizen.hauling, generator.fuel, granary.food, population);
+                citizen.hauling = haul_choice(
+                    citizen.hauling,
+                    generator.fuel,
+                    granary.food,
+                    population,
+                    built.of(Building::HuntersHut),
+                );
             }
         }
 
@@ -1348,22 +1369,23 @@ mod tests {
 
     #[test]
     fn haulers_turn_to_whichever_store_has_fallen_clearly_behind() {
-        assert_eq!(haul_choice(Cargo::Wood, 200, 1, 30), Cargo::Food);
-        assert_eq!(haul_choice(Cargo::Food, 1, 200, 30), Cargo::Wood);
+        assert_eq!(haul_choice(Cargo::Wood, 200, 1, 30, 0), Cargo::Food);
+        assert_eq!(haul_choice(Cargo::Food, 1, 200, 30, 0), Cargo::Wood);
     }
 
     #[test]
     fn a_hauler_holds_its_kind_until_the_other_store_clears_the_band() {
         let pop = 30;
-        let (fuel, food) = stores_apart(pop, HAUL_SWITCH_MARGIN / 2.0);
+        let band = haul_switch_margin(pop, 0);
+        let (fuel, food) = stores_apart(pop, band / 2.0);
         assert_eq!(
-            haul_choice(Cargo::Wood, fuel, food, pop),
+            haul_choice(Cargo::Wood, fuel, food, pop, 0),
             Cargo::Wood,
             "inside the band the workforce does not turn around"
         );
-        let (fuel, food) = stores_apart(pop, HAUL_SWITCH_MARGIN * 2.0);
+        let (fuel, food) = stores_apart(pop, band * 2.0);
         assert_eq!(
-            haul_choice(Cargo::Wood, fuel, food, pop),
+            haul_choice(Cargo::Wood, fuel, food, pop, 0),
             Cargo::Food,
             "past the band it does"
         );
@@ -1372,24 +1394,62 @@ mod tests {
     #[test]
     fn the_band_works_the_same_way_round() {
         let pop = 30;
-        let (fuel, food) = stores_apart(pop, -HAUL_SWITCH_MARGIN / 2.0);
-        assert_eq!(haul_choice(Cargo::Food, fuel, food, pop), Cargo::Food);
-        let (fuel, food) = stores_apart(pop, -HAUL_SWITCH_MARGIN * 2.0);
-        assert_eq!(haul_choice(Cargo::Food, fuel, food, pop), Cargo::Wood);
+        let band = haul_switch_margin(pop, 0);
+        let (fuel, food) = stores_apart(pop, -band / 2.0);
+        assert_eq!(haul_choice(Cargo::Food, fuel, food, pop, 0), Cargo::Food);
+        let (fuel, food) = stores_apart(pop, -band * 2.0);
+        assert_eq!(haul_choice(Cargo::Food, fuel, food, pop, 0), Cargo::Wood);
     }
 
     #[test]
     fn evenly_stocked_stores_leave_every_hauler_where_they_are() {
         let pop = 30;
         let (fuel, food) = stores_apart(pop, 0.0);
-        assert_eq!(haul_choice(Cargo::Wood, fuel, food, pop), Cargo::Wood);
-        assert_eq!(haul_choice(Cargo::Food, fuel, food, pop), Cargo::Food);
+        assert_eq!(haul_choice(Cargo::Wood, fuel, food, pop, 0), Cargo::Wood);
+        assert_eq!(haul_choice(Cargo::Food, fuel, food, pop, 0), Cargo::Food);
     }
 
     #[test]
     fn haul_choice_survives_an_empty_colony() {
-        assert_eq!(haul_choice(Cargo::Wood, 0, 0, 0), Cargo::Wood);
-        assert_eq!(haul_choice(Cargo::Food, 0, 0, 0), Cargo::Food);
+        assert_eq!(haul_choice(Cargo::Wood, 0, 0, 0, 0), Cargo::Wood);
+        assert_eq!(haul_choice(Cargo::Food, 0, 0, 0, 0), Cargo::Food);
+    }
+
+    #[test]
+    fn the_band_widens_with_every_hut_that_makes_a_haul_worth_more() {
+        assert!(haul_switch_margin(30, 1) > haul_switch_margin(30, 0));
+        assert!(haul_switch_margin(30, 3) > haul_switch_margin(30, 1));
+    }
+
+    #[test]
+    fn the_band_is_one_haul_wide_relative_to_the_workforce() {
+        assert!(
+            haul_switch_margin(60, 0) < haul_switch_margin(30, 0),
+            "with twice the haulers one trip moves the store half as far"
+        );
+        let band = haul_switch_margin(30, 0);
+        assert!(band > 0.0 && band.is_finite());
+        assert!(
+            haul_switch_margin(0, 0).is_finite(),
+            "an empty colony is not a divide by zero"
+        );
+    }
+
+    #[test]
+    fn a_hut_makes_the_workforce_slower_to_swing() {
+        let pop = 30;
+        let gap = haul_switch_margin(pop, 0) * 1.5;
+        let (fuel, food) = stores_apart(pop, gap);
+        assert_eq!(
+            haul_choice(Cargo::Wood, fuel, food, pop, 0),
+            Cargo::Food,
+            "with no hut that gap is worth turning around for"
+        );
+        assert_eq!(
+            haul_choice(Cargo::Wood, fuel, food, pop, 2),
+            Cargo::Wood,
+            "with huts standing the same gap is one haul away and not worth it"
+        );
     }
 
     #[test]
