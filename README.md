@@ -99,13 +99,13 @@ Ambient is -30 everywhere. The generator adds up to 66 on top of that at its own
 
 It burns one unit every four hours, plus another for every twenty citizens it has to warm and another for every boiler. Growth is paid for twice: once in timber, then forever in fuel.
 
-Sleeping under a roof cuts the bleed of body heat by a third. It is shelter, not a stove. Once the fire is too low to warm the centre, citizens stop walking to it and go home instead.
+Sleeping under a roof cuts the bleed of body heat by 30%. It is shelter, not a stove. Once the fire is too low to warm the centre, citizens stop walking to it and go home instead.
 
 ### Hauling
 
 Eight treelines of 50 units and four hunting grounds of 60 stand on the rim, 640 in total, and nothing regrows.
 
-A citizen picks which of the two to fetch by comparing each store against what the colony wants to hold per head, and keeps to that choice for the whole trip. They only change their mind when the other store has fallen a clear margin behind, because a round trip takes thirty-odd hours and a workforce that turns around every time a number crosses its target arrives too late in both directions. That margin is counted in hauls rather than units, so it widens as huts make each trip of game worth more: the slack a store gets is always about the same number of trips.
+A citizen picks which of the two to fetch by comparing each store against what the colony wants to hold per head, and keeps to that choice for the whole trip. They only change their mind when the other store has fallen a clear margin behind, because a round trip takes thirty-odd hours and a workforce that turns around every time a number crosses its target arrives too late in both directions. That margin is counted in hauls rather than units, so it widens as huts make each trip of game worth more: the slack a store gets is always about the same number of trips. The comparison is also made against what each store will hold once everyone already fetching that kind gets home, not against what is in it now, so a shortage pulls over as many haulers as it needs and no more.
 
 Wood goes on the fire. Game goes in the granary, and every hunter's hut standing means a carcass comes back dressed rather than dragged whole, so one haul is worth more.
 

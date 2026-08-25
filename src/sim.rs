@@ -133,6 +133,7 @@ pub const BOILER_WOOD_COST: u32 = 24;
 // can keep it fed.
 pub const UPGRADE_HEAT: f32 = 18.0;
 pub const BUILDING_COUNT: usize = 3;
+pub const CARGO_COUNT: usize = 2;
 // What the colony keeps behind the fire before it will break ground on a
 // project, so building never comes straight out of the next few nights.
 pub const BUILD_RESERVE: u32 = 50;
@@ -549,17 +550,48 @@ pub fn haul_switch_margin(population: usize, huts: usize) -> f32 {
     HAUL_SWITCH_HAULS * per_haul
 }
 
+/// What a store will hold once everyone already fetching that kind gets home.
+pub fn projected_stock(stock: u32, inbound: usize, per_haul: u32) -> u32 {
+    stock + inbound as u32 * per_haul
+}
+
+/// The colony as a hauler sees it when deciding what to fetch next.
+#[derive(Debug, Clone, Copy)]
+pub struct Supply {
+    pub fuel: u32,
+    pub food: u32,
+    /// Haulers already committed to each kind, by `Cargo` order.
+    pub inbound: [usize; CARGO_COUNT],
+    pub population: usize,
+    pub huts: usize,
+}
+
+impl Supply {
+    /// How well stocked a store will be once what is already walking towards it
+    /// arrives. Judging on the store alone sends the whole workforce after a
+    /// shortage that the first few haulers have already covered, and a round
+    /// trip is long enough that nobody finds out until it is too late.
+    pub fn projected_share(&self, cargo: Cargo) -> f32 {
+        let (stock, per_haul, per_head) = match cargo {
+            Cargo::Wood => (self.fuel, 1, FUEL_PER_CITIZEN),
+            Cargo::Food => (self.food, food_yield(self.huts), FOOD_PER_CITIZEN),
+        };
+        let inbound = self.inbound[cargo as usize];
+        stock_share(
+            projected_stock(stock, inbound, per_haul),
+            per_head,
+            self.population,
+        )
+    }
+}
+
 /// Which store a hauler works next. They keep to the kind they were on until
 /// the other store has fallen a clear margin behind, so a stockpile crossing
 /// its target does not swing the whole workforce round at once.
-pub fn haul_choice(current: Cargo, fuel: u32, food: u32, population: usize, huts: usize) -> Cargo {
-    let wood = stock_share(fuel, FUEL_PER_CITIZEN, population);
-    let game = stock_share(food, FOOD_PER_CITIZEN, population);
-    let (working, other) = match current {
-        Cargo::Wood => (wood, game),
-        Cargo::Food => (game, wood),
-    };
-    if other + haul_switch_margin(population, huts) < working {
+pub fn haul_choice(current: Cargo, supply: Supply) -> Cargo {
+    let working = supply.projected_share(current);
+    let other = supply.projected_share(current.other());
+    if other + haul_switch_margin(supply.population, supply.huts) < working {
         current.other()
     } else {
         current
@@ -873,7 +905,6 @@ pub fn construction(
 pub fn colony_growth(
     mut commands: Commands,
     tick: Res<Tick>,
-    built: Res<Built>,
     generator: Res<Generator>,
     granary: Res<Granary>,
     houses: Query<(&Pos, &Structure)>,
@@ -901,13 +932,7 @@ pub fn colony_growth(
             needs: Needs::newcomer(),
             home,
             carrying: None,
-            hauling: haul_choice(
-                Cargo::Wood,
-                generator.fuel,
-                granary.food,
-                people.len(),
-                built.of(Building::HuntersHut),
-            ),
+            hauling: Cargo::Wood,
         },
     ));
 }
@@ -926,6 +951,12 @@ pub fn citizen_ai(
     let output = generator_output(generator.fuel, built.of(Building::GeneratorUpgrade));
     let site_pos = construction.site.as_ref().map(|site| site.pos);
     let population = citizens.iter().count();
+    // Who is already committed to fetching what, kept up to date as citizens
+    // change their minds, so each decision this tick sees the ones before it.
+    let mut inbound = [0usize; CARGO_COUNT];
+    for (_, _, citizen) in &citizens {
+        inbound[citizen.hauling as usize] += 1;
+    }
 
     for (entity, mut pos, mut citizen) in &mut citizens {
         let at_home = pos.0 == citizen.home;
@@ -969,13 +1000,21 @@ pub fn citizen_ai(
                     (Cargo::Food, _) => granary.food += food_yield(built.of(Building::HuntersHut)),
                 }
                 citizen.carrying = None;
-                citizen.hauling = haul_choice(
+                let next = haul_choice(
                     citizen.hauling,
-                    generator.fuel,
-                    granary.food,
-                    population,
-                    built.of(Building::HuntersHut),
+                    Supply {
+                        fuel: generator.fuel,
+                        food: granary.food,
+                        inbound,
+                        population,
+                        huts: built.of(Building::HuntersHut),
+                    },
                 );
+                if next != citizen.hauling {
+                    inbound[citizen.hauling as usize] -= 1;
+                    inbound[next as usize] += 1;
+                    citizen.hauling = next;
+                }
             }
         }
 
@@ -1382,10 +1421,65 @@ mod tests {
         (fuel.round() as u32, food.round() as u32)
     }
 
+    /// The colony as a hauler sees it: stores, workforce, huts, nobody yet on
+    /// their way home.
+    fn supply(fuel: u32, food: u32, population: usize, huts: usize) -> Supply {
+        Supply {
+            fuel,
+            food,
+            inbound: [0; CARGO_COUNT],
+            population,
+            huts,
+        }
+    }
+
     #[test]
     fn haulers_turn_to_whichever_store_has_fallen_clearly_behind() {
-        assert_eq!(haul_choice(Cargo::Wood, 200, 1, 30, 0), Cargo::Food);
-        assert_eq!(haul_choice(Cargo::Food, 1, 200, 30, 0), Cargo::Wood);
+        assert_eq!(haul_choice(Cargo::Wood, supply(200, 1, 30, 0)), Cargo::Food);
+        assert_eq!(haul_choice(Cargo::Food, supply(1, 200, 30, 0)), Cargo::Wood);
+    }
+
+    #[test]
+    fn what_is_already_on_its_way_counts_towards_the_store() {
+        // Fuel sitting exactly on its target, game all but gone.
+        let short = supply(39, 1, 30, 0);
+        assert_eq!(
+            haul_choice(Cargo::Wood, short),
+            Cargo::Food,
+            "with nobody fetching game the shortage pulls a hauler over"
+        );
+        let mut answered = short;
+        answered.inbound[Cargo::Food as usize] = 20;
+        assert_eq!(
+            haul_choice(Cargo::Wood, answered),
+            Cargo::Wood,
+            "with the shortage already answered it pulls nobody else"
+        );
+    }
+
+    #[test]
+    fn a_haul_in_flight_is_worth_what_it_will_bring_back() {
+        let mut with_huts = supply(39, 1, 30, 3);
+        let mut without = supply(39, 1, 30, 0);
+        with_huts.inbound[Cargo::Food as usize] = 6;
+        without.inbound[Cargo::Food as usize] = 6;
+        assert_eq!(
+            haul_choice(Cargo::Wood, without),
+            Cargo::Food,
+            "six plain hauls do not cover the gap"
+        );
+        assert_eq!(
+            haul_choice(Cargo::Wood, with_huts),
+            Cargo::Wood,
+            "the same six do once huts make each one worth four"
+        );
+    }
+
+    #[test]
+    fn a_projection_is_the_store_plus_what_is_walking_towards_it() {
+        assert_eq!(projected_stock(10, 0, 3), 10);
+        assert_eq!(projected_stock(10, 4, 3), 22);
+        assert_eq!(projected_stock(0, 0, 1), 0);
     }
 
     #[test]
@@ -1394,13 +1488,13 @@ mod tests {
         let band = haul_switch_margin(pop, 0);
         let (fuel, food) = stores_apart(pop, band / 2.0);
         assert_eq!(
-            haul_choice(Cargo::Wood, fuel, food, pop, 0),
+            haul_choice(Cargo::Wood, supply(fuel, food, pop, 0)),
             Cargo::Wood,
             "inside the band the workforce does not turn around"
         );
         let (fuel, food) = stores_apart(pop, band * 2.0);
         assert_eq!(
-            haul_choice(Cargo::Wood, fuel, food, pop, 0),
+            haul_choice(Cargo::Wood, supply(fuel, food, pop, 0)),
             Cargo::Food,
             "past the band it does"
         );
@@ -1411,23 +1505,35 @@ mod tests {
         let pop = 30;
         let band = haul_switch_margin(pop, 0);
         let (fuel, food) = stores_apart(pop, -band / 2.0);
-        assert_eq!(haul_choice(Cargo::Food, fuel, food, pop, 0), Cargo::Food);
+        assert_eq!(
+            haul_choice(Cargo::Food, supply(fuel, food, pop, 0)),
+            Cargo::Food
+        );
         let (fuel, food) = stores_apart(pop, -band * 2.0);
-        assert_eq!(haul_choice(Cargo::Food, fuel, food, pop, 0), Cargo::Wood);
+        assert_eq!(
+            haul_choice(Cargo::Food, supply(fuel, food, pop, 0)),
+            Cargo::Wood
+        );
     }
 
     #[test]
     fn evenly_stocked_stores_leave_every_hauler_where_they_are() {
         let pop = 30;
         let (fuel, food) = stores_apart(pop, 0.0);
-        assert_eq!(haul_choice(Cargo::Wood, fuel, food, pop, 0), Cargo::Wood);
-        assert_eq!(haul_choice(Cargo::Food, fuel, food, pop, 0), Cargo::Food);
+        assert_eq!(
+            haul_choice(Cargo::Wood, supply(fuel, food, pop, 0)),
+            Cargo::Wood
+        );
+        assert_eq!(
+            haul_choice(Cargo::Food, supply(fuel, food, pop, 0)),
+            Cargo::Food
+        );
     }
 
     #[test]
     fn haul_choice_survives_an_empty_colony() {
-        assert_eq!(haul_choice(Cargo::Wood, 0, 0, 0, 0), Cargo::Wood);
-        assert_eq!(haul_choice(Cargo::Food, 0, 0, 0, 0), Cargo::Food);
+        assert_eq!(haul_choice(Cargo::Wood, supply(0, 0, 0, 0)), Cargo::Wood);
+        assert_eq!(haul_choice(Cargo::Food, supply(0, 0, 0, 0)), Cargo::Food);
     }
 
     #[test]
@@ -1456,12 +1562,12 @@ mod tests {
         let gap = haul_switch_margin(pop, 0) * 1.5;
         let (fuel, food) = stores_apart(pop, gap);
         assert_eq!(
-            haul_choice(Cargo::Wood, fuel, food, pop, 0),
+            haul_choice(Cargo::Wood, supply(fuel, food, pop, 0)),
             Cargo::Food,
             "with no hut that gap is worth turning around for"
         );
         assert_eq!(
-            haul_choice(Cargo::Wood, fuel, food, pop, 2),
+            haul_choice(Cargo::Wood, supply(fuel, food, pop, 2)),
             Cargo::Wood,
             "with huts standing the same gap is one haul away and not worth it"
         );
