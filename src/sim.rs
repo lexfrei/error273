@@ -133,7 +133,7 @@ pub const SPELL_SALT: u64 = 0x72;
 /// stop measuring against the year they had, how much of a bad thing they feel
 /// while that lasts, and how long it lasts.
 ///
-/// A colony that has just buried a third of itself is not hurt by cold and
+/// A colony that has just buried a quarter of itself is not hurt by cold and
 /// hunger in the measure it was a season ago, because it is no longer measuring
 /// against the same year; the same circumstances weigh less, survivors need
 /// less to stay level, and it wears off.
@@ -8538,7 +8538,7 @@ mod tests {
         let spared = mood_target(&bad, true);
         assert!(
             spared > ordinary,
-            "the same winter should weigh less on somebody who has just buried a third of the colony: {spared} against {ordinary}"
+            "the same winter should weigh less on somebody who has just buried a quarter of the colony: {spared} against {ordinary}"
         );
         assert!(spared < MOOD_BASE, "it weighs less, not nothing");
     }
