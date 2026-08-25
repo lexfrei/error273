@@ -6,6 +6,8 @@
 //! components the terminal renderer reads, and the sim runs on the same fixed
 //! 80 ms step it runs on headless.
 
+use std::time::Duration;
+
 use bevy::camera::ScalingMode;
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
@@ -17,6 +19,7 @@ use crate::sim::{
     focus_of, hardship_status, is_known, median, on_frame, regard_of,
 };
 use crate::status::{CitizenCard, Readings, STATUS_LINES, Status, status_lines};
+use crate::tempo::{TICK_MS_DEFAULT, ladder_step};
 
 /// Compiled in rather than loaded from `assets/`, so the binary draws the same
 /// map wherever it is run from.
@@ -81,6 +84,16 @@ struct Cell(IVec2);
 #[derive(Component)]
 struct StatusLine(usize);
 
+/// Where the tick length is shown, when it is not the one the game starts at.
+#[derive(Component)]
+struct TempoLine;
+
+/// How long a tick is right now. The launch value is where it starts and the
+/// keys move it from there; nothing about game time knows it exists, so a tick
+/// is one game hour at every rung.
+#[derive(Resource)]
+struct Tempo(u64);
+
 pub struct WindowRendererPlugin;
 
 impl Plugin for WindowRendererPlugin {
@@ -98,7 +111,11 @@ impl Plugin for WindowRendererPlugin {
         // times as fit, so a slow frame is made up rather than lost. All the
         // window needs from the tempo knob is the step itself.
         .insert_resource(Time::<Fixed>::from_duration(crate::tempo::tick_step()))
+        .insert_resource(Tempo(crate::tempo::tick_step().as_millis() as u64))
         .add_systems(Startup, spawn_board)
+        // Read every frame rather than every tick, so a key still answers at
+        // the slow end of the ladder where a tick is two thirds of a second.
+        .add_systems(Update, take_tempo_keys)
         .add_systems(FixedPostUpdate, (paint_map, paint_status));
     }
 }
@@ -136,6 +153,14 @@ fn spawn_board(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
             ));
         }
     }
+    commands.spawn((
+        TempoLine,
+        Text2d::new(""),
+        TextFont::from_font_size(STATUS_SIZE).with_font(font.clone()),
+        TextColor(INK_STATUS),
+        Anchor::CENTER_RIGHT,
+        Transform::from_xyz(MAP_SPAN / 2.0, MAP_SPAN / 2.0 + STATUS_LEAD * 0.5, 1.0),
+    ));
     for line in 0..STATUS_LINES {
         commands.spawn((
             StatusLine(line),
@@ -149,6 +174,43 @@ fn spawn_board(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
                 1.0,
             ),
         ));
+    }
+}
+
+/// The keys that move the tick length: quicker, slower, and back to where it
+/// started. There is deliberately no pause -- stopping the clock raises what
+/// happens to the wall-clock grid when it starts again, which is a different
+/// question from how fast to run and is not answered here.
+fn take_tempo_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut tempo: ResMut<Tempo>,
+    mut fixed: ResMut<Time<Fixed>>,
+    mut shown: Query<&mut Text2d, With<TempoLine>>,
+) {
+    let quicker = keys.just_pressed(KeyCode::Equal) || keys.just_pressed(KeyCode::NumpadAdd);
+    let slower = keys.just_pressed(KeyCode::Minus) || keys.just_pressed(KeyCode::NumpadSubtract);
+    let back = keys.just_pressed(KeyCode::Digit0) || keys.just_pressed(KeyCode::Numpad0);
+    let next = if back {
+        TICK_MS_DEFAULT
+    } else if quicker {
+        ladder_step(tempo.0, true)
+    } else if slower {
+        ladder_step(tempo.0, false)
+    } else {
+        return;
+    };
+    if next == tempo.0 {
+        return;
+    }
+    tempo.0 = next;
+    // From the next tick on, ticks are uniform again at the new length: what
+    // changes is how long one is, never how many there have been.
+    fixed.set_timestep(Duration::from_millis(next));
+    for mut text in &mut shown {
+        text.clear();
+        if next != TICK_MS_DEFAULT {
+            text.push_str(&format!("{next} ms/tick"));
+        }
     }
 }
 

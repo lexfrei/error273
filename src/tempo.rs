@@ -172,3 +172,100 @@ mod knob_tests {
         }
     }
 }
+
+/// The lengths a watcher can put a tick at, from the keyboard. A ladder rather
+/// than a free number because the point is to change speed at a glance, and
+/// each rung is double the one below so the whole range is six presses wide.
+///
+/// Window only: the headless build has no input, and a run whose tempo can be
+/// changed mid-flight is not the instrument the balance log reads.
+#[cfg(feature = "window")]
+pub const TICK_MS_LADDER: [u64; 6] = [20, 40, 80, 160, 320, 640];
+// Every rung has to sit inside the range the knob is allowed at all, and the
+// default has to be one of them or pressing for it would never arrive.
+#[cfg(feature = "window")]
+const _: () = {
+    let mut i = 0;
+    let mut has_default = false;
+    while i < TICK_MS_LADDER.len() {
+        assert!(TICK_MS_LADDER[i] >= TICK_MS_MIN && TICK_MS_LADDER[i] <= TICK_MS_MAX);
+        if TICK_MS_LADDER[i] == TICK_MS_DEFAULT {
+            has_default = true;
+        }
+        i += 1;
+    }
+    assert!(has_default);
+};
+
+/// The next rung up or down from wherever the tick length is now.
+///
+/// It works from a length rather than an index, so a launch value that is not
+/// on the ladder -- anything `ERROR273_TICK_MS` was set to -- steps onto the
+/// nearest rung in the direction asked for rather than jumping somewhere
+/// unrelated. At the ends it stays put.
+#[cfg(feature = "window")]
+pub fn ladder_step(ms: u64, quicker: bool) -> u64 {
+    let ms = clamp_tick_ms(ms);
+    if quicker {
+        TICK_MS_LADDER
+            .into_iter()
+            .rev()
+            .find(|rung| *rung < ms)
+            .unwrap_or(ms)
+    } else {
+        TICK_MS_LADDER
+            .into_iter()
+            .find(|rung| *rung > ms)
+            .unwrap_or(ms)
+    }
+}
+
+#[cfg(all(test, feature = "window"))]
+mod ladder_tests {
+    use super::*;
+
+    #[test]
+    fn a_press_moves_one_rung_and_no_further() {
+        assert_eq!(ladder_step(TICK_MS_DEFAULT, true), 40);
+        assert_eq!(ladder_step(TICK_MS_DEFAULT, false), 160);
+        assert_eq!(ladder_step(40, true), 20);
+        assert_eq!(ladder_step(160, false), 320);
+    }
+
+    #[test]
+    fn the_ends_of_the_ladder_hold() {
+        let quickest = TICK_MS_LADDER[0];
+        let slowest = TICK_MS_LADDER[TICK_MS_LADDER.len() - 1];
+        assert_eq!(ladder_step(quickest, true), quickest);
+        assert_eq!(ladder_step(slowest, false), slowest);
+    }
+
+    #[test]
+    fn a_launch_value_off_the_ladder_steps_onto_it() {
+        assert_eq!(ladder_step(100, true), 80, "the nearest rung below");
+        assert_eq!(ladder_step(100, false), 160, "and the nearest above");
+        assert_eq!(ladder_step(TICK_MS_MAX, true), 640);
+        assert_eq!(ladder_step(TICK_MS_MIN, false), 20);
+    }
+
+    #[test]
+    fn nothing_the_ladder_hands_back_is_outside_the_range() {
+        for start in [TICK_MS_MIN, 1, 77, TICK_MS_MAX, 100_000] {
+            for quicker in [true, false] {
+                let stepped = ladder_step(start, quicker);
+                assert_eq!(stepped, clamp_tick_ms(stepped), "{start} went out of range");
+            }
+        }
+    }
+
+    #[test]
+    fn walking_the_ladder_end_to_end_takes_five_presses() {
+        let mut ms = TICK_MS_LADDER[TICK_MS_LADDER.len() - 1];
+        let mut presses = 0;
+        while ms > TICK_MS_LADDER[0] && presses < 20 {
+            ms = ladder_step(ms, true);
+            presses += 1;
+        }
+        assert_eq!(presses, TICK_MS_LADDER.len() - 1);
+    }
+}
