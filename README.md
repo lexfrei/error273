@@ -82,6 +82,16 @@ It redraws in place about twelve times a second and exits on its own once everyo
 cargo test
 ```
 
+### In a window
+
+A terminal character box is about twice as tall as it is wide, which draws the disc as an oval. The window renderer puts the same glyphs on square cells, so the disc is round, and tints each cell's background by how warm that square is: near-black at ambient, ember close to a fed generator, cooling again as the fuel runs down. The status lines sit under the map as before.
+
+```bash
+cargo run --features window
+```
+
+The feature is off by default. Without it the build stays headless, on the dependency set and the build time it has always had.
+
 ## What the simulation does
 
 The map is a disc of radius 18. The generator sits at the centre, the treelines and hunting grounds on the rim, and everything the colony builds goes up on rings between them.

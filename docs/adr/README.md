@@ -15,5 +15,6 @@ Decisions that shaped error273, in the MADR-lite format: context, decision, cons
 - [0011. Entertainers are load-bearing](0011-entertainers-are-load-bearing.md) — proposed
 - [0012. The mayor's panel: legitimacy, window, and contest](0012-mayor-panel-legitimacy-window-contest.md) — proposed
 - [0013. Anti-spiral measures and a planned ending](0013-anti-spiral-and-a-planned-ending.md) — proposed
+- [0014. A windowed ASCII renderer](0014-windowed-ascii-renderer.md) — accepted
 
 The design that these decisions were drawn from is in [../design.md](../design.md), and the sourced research behind it is in [../research/](../research/).
