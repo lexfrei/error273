@@ -1,2 +1,6 @@
 # Paragraphs stay on one line so the renderer wraps them to the viewer's width.
 MD013: false
+# The research reports under docs/research cite their sources inline as bare
+# URLs. They are kept exactly as written so a claim can be checked against the
+# page it came from.
+MD034: false
