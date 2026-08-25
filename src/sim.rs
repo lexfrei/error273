@@ -127,6 +127,52 @@ pub const FRONT_DAYS: f32 = 6.0;
 pub const FRONT_STEP: f32 = 2.5;
 pub const FRONT_CAP: f32 = 8.0;
 pub const FRONT_SALT: u64 = 0x71;
+pub const SPELL_SALT: u64 = 0x72;
+
+/// The most the weather may ever take off the air in one spell.
+///
+/// This is the hurt-but-not-kill rule as a number. A budgeted event may push a
+/// colony that is already marginal over the edge; it may not take a healthy one
+/// out in a single blow, and the only thing standing between those two is this
+/// ceiling. It is set against what the fire holds back rather than picked: the
+/// generator reaches about thirteen cells on an average day and about nine at
+/// the winter floor, and this takes roughly the difference again -- a spell at
+/// full depth costs the colony about as much ground as deep winter already does.
+pub const BUDGET_CEILING: f32 = 12.0;
+/// What a colony with nothing to its name is still worth hitting with, and what
+/// each head and each store-share above that buys.
+pub const BUDGET_FLOOR: f32 = 2.0;
+pub const BUDGET_PER_HEAD: f32 = 0.06;
+pub const BUDGET_PER_SHARE: f32 = 2.0;
+/// How much of a colony's stores count towards what it can be hit with. A
+/// colony ten times over its target is not ten times worth hitting.
+pub const BUDGET_SHARE_CAP: f32 = 3.0;
+
+/// The grace a colony earns by not burying anybody, and loses when it does.
+/// Bounds and shape from the storyteller this is taken from: it rises with time
+/// since the last death and drops when one happens.
+pub const ADAPT_MIN: f32 = 0.4;
+pub const ADAPT_MAX: f32 = 1.5;
+pub const ADAPT_RISE_PER_YEAR: f32 = 0.35;
+pub const ADAPT_DEATH_COST: f32 = 0.12;
+
+/// How long a spell takes to arrive and to leave, and how long one lasts.
+///
+/// The onset is the point: the air reading has to show the approach before the
+/// depth lands, so that what a watcher sees is weather coming rather than an
+/// aftermath. It is the same idea as stopping a fast-forward a minute before
+/// the event instead of at it.
+pub const SPELL_ONSET_DAYS: u64 = 3;
+pub const SPELL_DAYS_MIN: u64 = 6;
+pub const SPELL_DAYS_MAX: u64 = 14;
+/// How often a spell begins, at a full budget. Scaled down with the budget, so
+/// a colony with nothing sees weather rarely as well as shallowly.
+pub const SPELL_CHANCE_PER_DAY: f32 = 0.035;
+/// Where a cold snap stops being a snap. A spell deeper than this share of the
+/// ceiling is called by its harder name.
+pub const BLIZZARD_SHARE: f32 = 0.6;
+/// How much of a spell's draw goes the warm way.
+pub const THAW_SHARE: f32 = 0.3;
 // A colony gets one winter to learn on. The ramp is on the cold half only, so
 // summers are the same every year.
 pub const SEVERITY_FIRST: f32 = 0.55;
@@ -1438,6 +1484,17 @@ pub struct Colony<'w, 's> {
     pub posts: Sheds<'w, 's>,
     /// Who has not come back.
     pub missing: ResMut<'w, Missing>,
+    /// Who has just stopped being here, which the weather asks about.
+    pub toll: ResMut<'w, Toll>,
+}
+
+/// Everything about the air, gathered into one borrow: what the weather is
+/// doing, what it has cost, and what the colony is standing in because of it.
+#[derive(SystemParam)]
+pub struct Sky<'w> {
+    pub weather: ResMut<'w, Weather>,
+    pub toll: ResMut<'w, Toll>,
+    pub air: ResMut<'w, Air>,
 }
 
 /// Everything the colony has put by, gathered into one borrow so readers do not
@@ -2137,14 +2194,141 @@ pub fn front_step(front: f32, world: u64, day: u64) -> f32 {
     (front * memory + push).clamp(-FRONT_CAP, FRONT_CAP)
 }
 
+/// What the weather is doing beyond wandering: a spell of it, with a beginning
+/// and an end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spell {
+    ColdSnap,
+    Blizzard,
+    Thaw,
+}
+
+/// One spell, as the colony is living through it.
+#[derive(Debug, Clone, Copy)]
+pub struct Weathering {
+    pub kind: Spell,
+    /// How far it takes the air at its worst, always a positive number: which
+    /// way it goes is the kind's business.
+    pub depth: f32,
+    pub began: u64,
+    pub days: u64,
+}
+
+impl Weathering {
+    /// What this spell is doing to the air on a given day, signed. It comes on
+    /// over the onset, holds, and goes off again over the same, so a watcher
+    /// sees it approaching and sees it leave rather than meeting a step twice.
+    pub fn air_on(&self, day: u64) -> f32 {
+        if day <= self.began || day >= self.began + self.days {
+            return 0.0;
+        }
+        let through = day - self.began;
+        let left = self.days - through;
+        let ramp = (through.min(SPELL_ONSET_DAYS) as f32 / SPELL_ONSET_DAYS as f32)
+            .min(left.min(SPELL_ONSET_DAYS) as f32 / SPELL_ONSET_DAYS as f32);
+        let depth = self.depth * ramp;
+        match self.kind {
+            Spell::Thaw => depth,
+            _ => -depth,
+        }
+    }
+}
+
+/// What the colony would call the sky today.
+pub fn weather_word(spell: Option<&Weathering>, day: u64) -> &'static str {
+    match spell {
+        Some(spell) if spell.air_on(day) != 0.0 => match spell.kind {
+            Spell::ColdSnap => "snow",
+            Spell::Blizzard => "blizzard",
+            Spell::Thaw => "thaw",
+        },
+        _ => "clear",
+    }
+}
+
+/// What the colony can be hit with, in the degrees the air is measured in.
+///
+/// Budgeted rather than rolled, and budgeted from the colony's own success:
+/// mouths to feed and stores per head, held down through the first year by the
+/// ramp the winters already use, and eased by the grace a colony earns for not
+/// burying anybody. Capped, always, because the rule of this layer is to hurt
+/// and not to kill.
+pub fn severity_budget(population: usize, fuel: u32, food: u32, year: u64, adaptation: f32) -> f32 {
+    let share = stock_share(fuel, FUEL_PER_CITIZEN, population)
+        .min(stock_share(food, FOOD_PER_CITIZEN, population))
+        .clamp(0.0, BUDGET_SHARE_CAP);
+    let standing = BUDGET_FLOOR + population as f32 * BUDGET_PER_HEAD + share * BUDGET_PER_SHARE;
+    (standing * severity(year) * adaptation).clamp(0.0, BUDGET_CEILING)
+}
+
+/// One tick of the grace a colony earns by not burying anybody.
+pub fn adaptation_step(adaptation: f32, a_death: bool) -> f32 {
+    let moved = if a_death {
+        adaptation - ADAPT_DEATH_COST
+    } else {
+        adaptation + per_year(ADAPT_RISE_PER_YEAR)
+    };
+    moved.clamp(ADAPT_MIN, ADAPT_MAX)
+}
+
+/// Whether the weather turns today, and into what. Drawn from the world's own
+/// seed and the day, so a run replays; how often and how deep both come off the
+/// budget, so a colony with little sees weather rarely and shallowly.
+pub fn spell_due(budget: f32, world: u64, day: u64) -> Option<Weathering> {
+    let room = (budget / BUDGET_CEILING).clamp(0.0, 1.0);
+    if noise(world, SPELL_SALT.wrapping_add(day)) >= SPELL_CHANCE_PER_DAY * room {
+        return None;
+    }
+    let draw = noise(world, SPELL_SALT.wrapping_add(day).wrapping_mul(3));
+    let depth = budget * (0.4 + 0.6 * draw);
+    let length = noise(world, SPELL_SALT.wrapping_add(day).wrapping_mul(5));
+    let days = SPELL_DAYS_MIN + (length * (SPELL_DAYS_MAX - SPELL_DAYS_MIN) as f32) as u64;
+    let kind = if noise(world, SPELL_SALT.wrapping_add(day).wrapping_mul(7)) < THAW_SHARE {
+        Spell::Thaw
+    } else if depth >= BUDGET_CEILING * BLIZZARD_SHARE {
+        Spell::Blizzard
+    } else {
+        Spell::ColdSnap
+    };
+    Some(Weathering {
+        kind,
+        depth,
+        began: day,
+        days,
+    })
+}
+
 /// How far the weather has wandered from the climate, and when it last moved.
 /// The front needs a day of memory, which is why it lives here rather than
 /// being a function of the tick like the season and the hour are.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct Weather {
     pub front: f32,
     pub day: u64,
+    /// The grace the colony has earned by not burying anybody.
+    pub adaptation: f32,
+    /// The spell it is living through, if any.
+    pub spell: Option<Weathering>,
+    /// What the sky is doing, as the colony would say it.
+    pub word: &'static str,
 }
+
+impl Default for Weather {
+    fn default() -> Self {
+        Self {
+            front: 0.0,
+            day: 0,
+            adaptation: 1.0,
+            spell: None,
+            word: "clear",
+        }
+    }
+}
+
+/// Deaths since anybody last looked. The grace a colony earns is spent by them,
+/// so somebody has to count them, and the weather is who asks.
+#[derive(Resource, Default)]
+pub struct Toll(pub u32);
 
 /// The air outside the generator's reach at the hour a tick falls on, before
 /// the weather is added to it.
@@ -3105,22 +3289,43 @@ pub fn burn_fuel(
 pub fn advance_weather(
     tick: Res<Tick>,
     built: Res<Built>,
-    generator: Res<Generator>,
+    stores: Stores,
+    citizens: Query<&Citizen>,
     posts: Query<(&Pos, &Cache)>,
-    mut weather: ResMut<Weather>,
-    mut air: ResMut<Air>,
+    mut sky: Sky,
 ) {
+    let (weather, toll) = (&mut sky.weather, &mut sky.toll);
+    // Grace is earned and spent by the tick, because a death happens on one.
+    weather.adaptation = adaptation_step(weather.adaptation, toll.0 > 0);
+    toll.0 = 0;
+
     // The weather moves once a day and the climate and the hour move with every
-    // tick, so the front is stepped on the day boundary and carried across the
-    // hours in between.
+    // tick, so the front and the spell are stepped on the day boundary and
+    // carried across the hours in between.
     let day = tick.0 / ticks_per_day();
+    let population = citizens.iter().count();
+    let budget = severity_budget(
+        population,
+        stores.generator.fuel,
+        stores.granary.food,
+        tick.0 / ticks_per_year() + 1,
+        weather.adaptation,
+    );
     while weather.day < day {
         weather.day += 1;
         weather.front = front_step(weather.front, WORLD_SEED, weather.day);
+        if weather
+            .spell
+            .is_none_or(|spell| weather.day >= spell.began + spell.days)
+        {
+            weather.spell = spell_due(budget, WORLD_SEED, weather.day);
+        }
     }
+    let spelling = weather.spell.map_or(0.0, |spell| spell.air_on(day));
+    weather.word = weather_word(weather.spell.as_ref(), day);
     let mut fires = vec![Fire {
         at: CENTER,
-        output: generator_output(generator.fuel, built.of(Building::GeneratorUpgrade)),
+        output: generator_output(stores.generator.fuel, built.of(Building::GeneratorUpgrade)),
     }];
     // A waystation with an empty shed is a place to stand and nothing more.
     fires.extend(
@@ -3132,9 +3337,9 @@ pub fn advance_weather(
                 output: WAYSTATION_HEAT,
             }),
     );
-    *air = Air {
+    *sky.air = Air {
         fires,
-        ambient: ambient_at(tick.0) + weather.front,
+        ambient: ambient_at(tick.0) + weather.front + spelling,
     };
 }
 
@@ -3605,6 +3810,7 @@ pub fn citizen_ai(
         citizen.hardship = hardship_step(citizen.hardship, citizen.mood);
         if citizen.needs.spent() {
             colony.missing.take_note(pos.0, tick.0);
+            colony.toll.0 += 1;
             commands.entity(entity).despawn();
             continue;
         }
@@ -3622,6 +3828,7 @@ pub fn citizen_ai(
             );
             if cold_takes(resistance, roll) {
                 colony.missing.take_note(pos.0, tick.0);
+                colony.toll.0 += 1;
                 commands.entity(entity).despawn();
                 continue;
             }
@@ -8064,5 +8271,150 @@ mod tests {
             other,
             "a different world gets its own weather"
         );
+    }
+
+    fn well_off() -> (usize, u32, u32) {
+        (CITIZENS * 2, 4000, 2000)
+    }
+
+    #[test]
+    fn a_colony_with_more_to_lose_can_be_hit_harder() {
+        let (pop, fuel, food) = well_off();
+        let fat = severity_budget(pop, fuel, food, SEVERITY_FULL_YEAR, 1.0);
+        // Fewer mouths and, the part that matters, less per mouth: dividing the
+        // stores by the same factor as the heads leaves a colony just as well
+        // off and buys nothing.
+        let lean = severity_budget(pop / 4, fuel / 200, food / 200, SEVERITY_FULL_YEAR, 1.0);
+        assert!(
+            fat > lean * 1.5,
+            "a fat colony should be worth hitting harder: {fat} against {lean}"
+        );
+        assert!(lean >= 0.0, "and a poor one is never owed a bonus");
+    }
+
+    #[test]
+    fn nothing_the_colony_does_gets_it_hit_past_the_ceiling() {
+        for pop in [1, CITIZENS, 500, 5000] {
+            for stores in [0, 1000, u32::MAX / 2] {
+                let budget = severity_budget(pop, stores, stores, 900, ADAPT_MAX);
+                assert!(
+                    (0.0..=BUDGET_CEILING).contains(&budget),
+                    "pop {pop} with {stores} put by bought a budget of {budget}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_first_year_is_held_down_and_the_fortieth_is_not() {
+        let (pop, fuel, food) = well_off();
+        let first = severity_budget(pop, fuel, food, 1, 1.0);
+        let later = severity_budget(pop, fuel, food, SEVERITY_FULL_YEAR, 1.0);
+        assert!(
+            first < later,
+            "the ramp that holds the first winter down is the same ramp"
+        );
+    }
+
+    #[test]
+    fn grace_is_bought_by_time_and_spent_by_a_death() {
+        let mut grace = ADAPT_MIN;
+        for _ in 0..ticks_per_year() * 5 {
+            grace = adaptation_step(grace, false);
+        }
+        assert!(grace > ADAPT_MIN, "five quiet years should buy something");
+        let after = adaptation_step(grace, true);
+        assert!(after < grace, "and a death should spend it");
+        let mut floor = ADAPT_MAX;
+        for _ in 0..200 {
+            floor = adaptation_step(floor, true);
+        }
+        assert!(
+            (ADAPT_MIN..=ADAPT_MAX).contains(&floor),
+            "grace stayed inside its bounds: {floor}"
+        );
+    }
+
+    #[test]
+    fn a_spell_is_seen_coming_before_it_lands() {
+        let spell = Weathering {
+            kind: Spell::Blizzard,
+            depth: 9.0,
+            began: 100,
+            days: 10,
+        };
+        assert_eq!(spell.air_on(99), 0.0, "nothing before it starts");
+        assert_eq!(spell.air_on(100), 0.0, "nor on the day it turns");
+        let onset = spell.air_on(100 + SPELL_ONSET_DAYS / 2);
+        assert!(
+            onset < 0.0 && onset > -9.0,
+            "the approach has to be visible and shallower than the depth: {onset}"
+        );
+        assert_eq!(spell.air_on(100 + SPELL_ONSET_DAYS), -9.0, "then the depth");
+        assert_eq!(spell.air_on(110), 0.0, "and nothing after it is over");
+    }
+
+    #[test]
+    fn a_thaw_goes_the_other_way() {
+        let thaw = Weathering {
+            kind: Spell::Thaw,
+            depth: 5.0,
+            began: 0,
+            days: 8,
+        };
+        assert!(
+            thaw.air_on(SPELL_ONSET_DAYS) > 0.0,
+            "a thaw is warmth, not cold"
+        );
+    }
+
+    #[test]
+    fn the_colony_has_a_word_for_what_the_sky_is_doing() {
+        assert_eq!(weather_word(None, 0), "clear");
+        let blizzard = Weathering {
+            kind: Spell::Blizzard,
+            depth: 9.0,
+            began: 0,
+            days: 10,
+        };
+        assert_eq!(weather_word(Some(&blizzard), SPELL_ONSET_DAYS), "blizzard");
+        let snap = Weathering {
+            kind: Spell::ColdSnap,
+            depth: 4.0,
+            began: 0,
+            days: 10,
+        };
+        assert_eq!(weather_word(Some(&snap), SPELL_ONSET_DAYS), "snow");
+        let thaw = Weathering {
+            kind: Spell::Thaw,
+            depth: 4.0,
+            began: 0,
+            days: 10,
+        };
+        assert_eq!(weather_word(Some(&thaw), SPELL_ONSET_DAYS), "thaw");
+        assert_eq!(
+            weather_word(Some(&blizzard), 99),
+            "clear",
+            "a spell that is over is not a word any more"
+        );
+    }
+
+    #[test]
+    fn a_bigger_budget_buys_deeper_and_more_frequent_weather() {
+        let over_a_decade = |budget: f32| -> (usize, f32) {
+            let spells: Vec<Weathering> = (0..days_per_year() * 10)
+                .filter_map(|day| spell_due(budget, WORLD_SEED, day))
+                .collect();
+            let deepest = spells.iter().map(|s| s.depth).fold(0.0f32, f32::max);
+            (spells.len(), deepest)
+        };
+        let (rare, shallow) = over_a_decade(BUDGET_CEILING / 4.0);
+        let (often, deep) = over_a_decade(BUDGET_CEILING);
+        assert!(
+            often > rare,
+            "a richer colony sees more of them: {often} against {rare}"
+        );
+        assert!(deep > shallow, "and deeper ones: {deep} against {shallow}");
+        assert!(deep <= BUDGET_CEILING, "but never past the ceiling");
     }
 }

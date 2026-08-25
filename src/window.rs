@@ -335,6 +335,7 @@ fn paint_status(
         tick: readings.outside.tick.0,
         calendar: *readings.outside.calendar,
         ambient: readings.outside.air.ambient,
+        weather: readings.weather.word,
         alive: ages.len(),
         off_frame: walkers.iter().filter(|pos| !on_frame(pos.0)).count(),
         missing: readings.missing.count(),

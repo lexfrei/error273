@@ -164,6 +164,10 @@ A day has a shape of its own on top of that. The air swings six degrees between 
 
 On top of both there is weather, which is a different thing from climate: how far today has wandered from the season it belongs to. Today's departure is most of yesterday's plus a fresh push, so cold spells and mild ones last about six days and arrive in runs rather than one day at a time, and they never take the air more than eight degrees from where the season says it should be. It is drawn from the world's own seed, so the same world gets the same weather every time it is founded.
 
+On top of the wandering there are spells: cold snaps, blizzards and thaws, which last a week or two and arrive with a few days of warning rather than all at once, so the air reading shows the weather coming instead of only its aftermath. The status line names what the sky is doing beside the number that says how cold.
+
+How deep and how often is not rolled. It is a budget worked out from what the colony has to lose -- how many mouths, and how much is put by for each of them -- held down through the first year by the same ramp that scales the winters, and eased by grace the colony earns for not burying anybody and spends the moment it does. The whole of it is capped, which is the rule of this layer stated as a number: a spell may push a colony that is already marginal over the edge, and it may not take a healthy one out in a single blow.
+
 Treelines and hunting grounds grow back a little every day towards a cap of their own, in spring, summer and autumn. Nothing grows back in winter, which is what makes winter a thing to be survived rather than worked through: whatever is standing when it starts is the whole of what there is until spring. For the same reason the colony will not break ground on a project in winter, and will not break ground at all unless it holds half again what it wants per head behind the fire.
 
 ### The fire

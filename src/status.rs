@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use crate::sim::{
     ADULT_AGE, BUILDING_COUNT, BUILDINGS, Ballot, Building, CENTER, Calendar, Cargo, Construction,
     FRAILTY_ONSET, Focus, Hardship, Missing, NEAR_GROUND, Outside, Patches, Regard, STAT_COUNT,
-    STATS, Stores, THOUGHT_COUNT, THOUGHTS, Thought, couples, is_adult,
+    STATS, Stores, THOUGHT_COUNT, THOUGHTS, Thought, Weather, couples, is_adult,
 };
 
 pub const STATUS_LINES: usize = 5;
@@ -19,6 +19,7 @@ pub struct Readings<'w> {
     pub construction: Res<'w, Construction>,
     pub ballot: Res<'w, Ballot>,
     pub missing: Res<'w, Missing>,
+    pub weather: Res<'w, Weather>,
 }
 
 impl Readings<'_> {
@@ -41,6 +42,10 @@ pub struct Status {
     pub tick: u64,
     pub calendar: Calendar,
     pub ambient: f32,
+    /// What the sky is doing, in the colony's own word for it. Beside the air
+    /// rather than instead of it: the number says how cold and the word says
+    /// why.
+    pub weather: &'static str,
     pub alive: usize,
     /// Citizens working past the edge of the frame. The window cannot show them
     /// and the headless build has no frame at all, so both report the count.
@@ -122,13 +127,14 @@ pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
         .count();
     [
         format!(
-            "tick {:5}  year {}  {:<6}  day {:2}  hour {:02}  air {:+.0}",
+            "tick {:5}  year {}  {:<6}  day {:2}  hour {:02}  air {:+.0} {}",
             status.tick,
             status.calendar.year,
             status.calendar.season.name(),
             status.calendar.day,
             status.calendar.hour,
-            status.ambient
+            status.ambient,
+            status.weather
         ),
         format!(
             "pop {:3}  out {:2}  missing {:2}  fuel {:4}  food {:4}  wood {:4}  game {:4}",
@@ -222,6 +228,7 @@ mod tests {
             tick: 0,
             calendar: calendar_at(0),
             ambient: 0.0,
+            weather: "clear",
             alive: 1,
             off_frame: 0,
             missing: 0,
