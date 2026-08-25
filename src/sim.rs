@@ -333,6 +333,14 @@ pub const NEED_WEIGHT_SURVIVAL: f32 = 10.0;
 /// shape this is taken from tops out at; the knee is near the bottom because a
 /// need at a tenth is a different thing from a need at half.
 pub const FOCUS_FLOOR: f32 = 0.5;
+/// Where a mood sits with nothing being felt either way, and the top of the
+/// scale it is printed on.
+pub const MOOD_BASE: f32 = 50.0;
+pub const MOOD_MAX: f32 = 100.0;
+/// How far a mood travels towards its target in a day, up and down. Up is
+/// quicker, which is the shape of the bar this is taken from.
+pub const MOOD_RISE_PER_DAY: f32 = 12.0;
+pub const MOOD_FALL_PER_DAY: f32 = 8.0;
 pub const FOCUS_KNEE: f32 = 15.0;
 /// How much heavier a point of a need costs below the knee than above it.
 pub const FOCUS_KNEE_BITE: f32 = 1.0;
@@ -595,6 +603,116 @@ fn focus_cost(kind: NeedKind, level: f32) -> f32 {
     let short = ((rules.low - level) / rules.low).clamp(0.0, 1.0);
     let bite = ((FOCUS_KNEE - level) / FOCUS_KNEE).clamp(0.0, 1.0);
     rules.weight * (short + bite * FOCUS_KNEE_BITE)
+}
+
+/// Something true of a citizen that they feel about.
+///
+/// Named rather than summed straight into a number, because a colony that can
+/// only print a total cannot tell anybody why, and the list is the thing a face
+/// would show. Every one of these is read off state that already exists; none
+/// of them is an event this layer invented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Thought {
+    Cold,
+    Hungry,
+    Worn,
+    WrongWork,
+    Missing,
+    Plenty,
+}
+
+pub const THOUGHT_COUNT: usize = 6;
+pub const THOUGHTS: [Thought; THOUGHT_COUNT] = [
+    Thought::Cold,
+    Thought::Hungry,
+    Thought::Worn,
+    Thought::WrongWork,
+    Thought::Missing,
+    Thought::Plenty,
+];
+
+impl Thought {
+    pub fn name(self) -> &'static str {
+        match self {
+            Thought::Cold => "cold",
+            Thought::Hungry => "hungry",
+            Thought::Worn => "worn out",
+            Thought::WrongWork => "wrong work",
+            Thought::Missing => "somebody gone",
+            Thought::Plenty => "plenty",
+        }
+    }
+
+    /// What holding this does to where a mood is headed. The two that can kill
+    /// weigh most; the one good thing here is worth less than any single bad
+    /// one, which is the asymmetry the shape this is taken from has.
+    pub fn weight(self) -> f32 {
+        match self {
+            Thought::Cold => -18.0,
+            Thought::Hungry => -20.0,
+            Thought::Worn => -8.0,
+            Thought::WrongWork => -6.0,
+            Thought::Missing => -10.0,
+            Thought::Plenty => 6.0,
+        }
+    }
+}
+
+/// What a citizen is holding right now. A need counts only once it is past the
+/// mark they act at -- the ordinary swing of a need is not something anybody
+/// feels about, for the same reason it costs no focus.
+pub fn thoughts_of(
+    needs: &Needs,
+    marks: &[Marks; NEED_COUNT],
+    wrong_work: bool,
+    somebody_missing: bool,
+    plenty: bool,
+) -> [bool; THOUGHT_COUNT] {
+    let past = |kind: NeedKind| needs.level(kind) < marks[kind as usize].low;
+    let mut held = [false; THOUGHT_COUNT];
+    held[Thought::Cold as usize] = past(NeedKind::Warmth);
+    held[Thought::Hungry as usize] = past(NeedKind::Food);
+    held[Thought::Worn as usize] = past(NeedKind::Rest);
+    held[Thought::WrongWork as usize] = wrong_work;
+    held[Thought::Missing as usize] = somebody_missing;
+    held[Thought::Plenty as usize] = plenty;
+    held
+}
+
+/// Where a mood is headed: the base everybody starts from, plus whatever is
+/// being held. Instant, and never the number that is printed -- what is printed
+/// is chasing this.
+pub fn mood_target(held: &[bool; THOUGHT_COUNT]) -> f32 {
+    MOOD_BASE
+        + THOUGHTS
+            .into_iter()
+            .filter(|thought| held[*thought as usize])
+            .map(Thought::weight)
+            .sum::<f32>()
+}
+
+/// One tick of a mood chasing its target: quicker up than down, and standing
+/// still while somebody is asleep, because a mood is about a day being lived
+/// and a sleeping citizen is not living one.
+///
+/// The rates are per game day and not per game hour. At this tempo an hourly
+/// rate puts every citizen on their target inside a morning, and a bar that is
+/// always at its target is the target with extra arithmetic.
+pub fn mood_step(mood: f32, target: f32, asleep: bool) -> f32 {
+    if asleep {
+        return mood;
+    }
+    let target = target.clamp(0.0, MOOD_MAX);
+    let step = if target > mood {
+        per_day(MOOD_RISE_PER_DAY)
+    } else {
+        -per_day(MOOD_FALL_PER_DAY)
+    };
+    if (target - mood).abs() <= step.abs() {
+        target
+    } else {
+        (mood + step).clamp(0.0, MOOD_MAX)
+    }
 }
 
 /// The one multiplier every mismatch resolves into.
@@ -1719,6 +1837,16 @@ pub struct Citizen {
     /// What they do with their days, and what they have practised at.
     pub trade: Trade,
     pub experience: [f32; TRADE_COUNT],
+    /// How this one is bearing up. Nothing in the simulation reads it yet: the
+    /// ballot keeps its own two currencies -- what a need cost and what a walk
+    /// wasted -- until the culture layer gives a mood somewhere to go. It is
+    /// printed so that what is happening to people is visible before anything
+    /// acts on it.
+    pub mood: f32,
+    /// What they are holding that makes it. Kept beside the mood rather than
+    /// worked out again by whoever prints it, because the inputs are half the
+    /// colony and a second copy of that sum is a second answer waiting to differ.
+    pub held: [bool; THOUGHT_COUNT],
     /// Where this citizen is walking to look, if the colony has sent them out.
     /// A scout brings back the map and nothing else.
     pub scouting: Option<IVec2>,
@@ -2715,6 +2843,8 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
                 carrying: None,
                 hauling: Cargo::Wood,
                 scouting: None,
+                mood: MOOD_BASE,
+                held: [false; THOUGHT_COUNT],
             },
         ));
     }
@@ -3224,6 +3354,8 @@ pub fn colony_growth(
                 carrying: None,
                 hauling: Cargo::Wood,
                 scouting: None,
+                mood: MOOD_BASE,
+                held: [false; THOUGHT_COUNT],
             },
         ));
     }
@@ -3270,6 +3402,9 @@ pub fn citizen_ai(
     }
     let site_pos = colony.construction.site.as_ref().map(|site| site.pos);
     let population = citizens.iter().count();
+    let somebody_missing = colony.missing.count() > 0;
+    let plenty = stock_share(colony.generator.fuel, FUEL_PER_CITIZEN, population) >= 1.0
+        && stock_share(colony.granary.food, FOOD_PER_CITIZEN, population) >= 1.0;
     // Who is already committed to fetching what, kept up to date as citizens
     // change their minds, so each decision this tick sees the ones before it.
     let mut inbound = [0usize; CARGO_COUNT];
@@ -3288,6 +3423,10 @@ pub fn citizen_ai(
         // What the walk home would cost from where they are standing, which is
         // what warmth's marks are measured against rather than a fixed number.
         let marks = marks_for(cost_of_getting_home(pos.0, air), caution_margin(&citizen));
+        let fit = trade_fit(
+            citizen.upbringing.stats().of(trade_stat(citizen.trade)),
+            citizen.experience[citizen.trade as usize],
+        );
         let duty = choose_duty(&citizen.needs, citizen.carrying, grown, &marks);
 
         // Eating is what makes the food need met this tick, so it happens before
@@ -3308,6 +3447,14 @@ pub fn citizen_ai(
                 .needs
                 .step(kind, met[index], scale, marks[kind as usize]);
         }
+        // How they are bearing up, worked out from what is true of them and of
+        // the colony rather than from anything this layer had to invent.
+        citizen.held = thoughts_of(&citizen.needs, &marks, fit < 1.0, somebody_missing, plenty);
+        citizen.mood = mood_step(
+            citizen.mood,
+            mood_target(&citizen.held),
+            duty == Duty::Rest && at_home,
+        );
         if citizen.needs.spent() {
             colony.missing.take_note(pos.0, tick.0);
             commands.entity(entity).despawn();
@@ -3414,7 +3561,6 @@ pub fn citizen_ai(
             // What a citizen lifts is decided here, where it comes out of the
             // ground, so that what leaves the patch is what reaches the store.
             let raised = citizen.upbringing.stats().of(trade_stat(citizen.trade));
-            let fit = trade_fit(raised, citizen.experience[citizen.trade as usize]);
             let (wanted, banked) = haul_load(
                 effective_stat(raised, focus_of(&citizen.needs), fit),
                 citizen.banked,
@@ -7417,5 +7563,99 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 4, "four bands, walked bottom to top, each once");
+    }
+
+    fn nothing_the_matter() -> [bool; THOUGHT_COUNT] {
+        thoughts_of(&contented(), &at_the_fire(), false, false, true)
+    }
+
+    #[test]
+    fn a_citizen_with_nothing_the_matter_still_has_something_to_feel() {
+        let held = nothing_the_matter();
+        assert!(
+            held[Thought::Plenty as usize],
+            "a colony with something put by is a thing to be glad of"
+        );
+        assert!(!held[Thought::Cold as usize]);
+        assert!(!held[Thought::Hungry as usize]);
+        assert!(!held[Thought::Worn as usize]);
+        assert!(!held[Thought::Missing as usize]);
+        assert_eq!(
+            mood_target(&held),
+            MOOD_BASE + Thought::Plenty.weight(),
+            "the target is the base plus what is actually being felt"
+        );
+    }
+
+    #[test]
+    fn every_thought_has_a_name_and_a_weight_of_its_own() {
+        let mut names = Vec::new();
+        for thought in THOUGHTS {
+            assert!(!thought.name().is_empty(), "a thought nobody can print");
+            assert!(!names.contains(&thought.name()), "two thoughts, one name");
+            names.push(thought.name());
+            assert_ne!(thought.weight(), 0.0, "a thought that changes nothing");
+        }
+        assert_eq!(names.len(), THOUGHT_COUNT);
+    }
+
+    #[test]
+    fn what_is_wrong_shows_up_by_name_and_not_only_in_the_total() {
+        let cold = thoughts_of(&all_at(1.0), &at_the_fire(), true, true, false);
+        assert!(cold[Thought::Cold as usize]);
+        assert!(cold[Thought::Hungry as usize]);
+        assert!(cold[Thought::Worn as usize]);
+        assert!(cold[Thought::WrongWork as usize]);
+        assert!(cold[Thought::Missing as usize]);
+        assert!(!cold[Thought::Plenty as usize]);
+        assert!(
+            mood_target(&cold) < mood_target(&nothing_the_matter()),
+            "and the total follows the names rather than replacing them"
+        );
+    }
+
+    #[test]
+    fn a_mood_rises_faster_than_it_falls() {
+        let rise = mood_step(MOOD_BASE, MOOD_BASE + 40.0, false);
+        let fall = mood_step(MOOD_BASE, MOOD_BASE - 40.0, false);
+        assert!(rise > MOOD_BASE && fall < MOOD_BASE);
+        assert!(
+            rise - MOOD_BASE > MOOD_BASE - fall,
+            "cheering up is quicker than sinking, which is the shape borrowed"
+        );
+    }
+
+    #[test]
+    fn a_mood_does_not_move_while_somebody_is_asleep() {
+        assert_eq!(mood_step(40.0, 90.0, true), 40.0);
+        assert_eq!(mood_step(40.0, 0.0, true), 40.0);
+    }
+
+    #[test]
+    fn a_mood_settles_on_its_target_and_stops_there() {
+        let target = MOOD_BASE - 30.0;
+        let mut mood = MOOD_BASE;
+        for _ in 0..ticks_per_day() * 30 {
+            mood = mood_step(mood, target, false);
+        }
+        assert!(
+            (mood - target).abs() < 0.5,
+            "a month of chasing should arrive: {mood} against {target}"
+        );
+        assert_eq!(mood_step(target, target, false), target, "and then stay");
+    }
+
+    #[test]
+    fn a_mood_never_leaves_the_range_it_is_printed_in() {
+        for target in [-500.0, 0.0, MOOD_MAX, 500.0] {
+            let mut mood = MOOD_BASE;
+            for _ in 0..ticks_per_year() {
+                mood = mood_step(mood, target, false);
+                assert!(
+                    (0.0..=MOOD_MAX).contains(&mood),
+                    "mood {mood} is off the scale"
+                );
+            }
+        }
     }
 }

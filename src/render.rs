@@ -54,6 +54,8 @@ pub fn print_status(
             }
             CitizenCard {
                 focus: focus_band(focus_of(&citizen.needs)),
+                mood: citizen.mood,
+                held: citizen.held,
                 seed: citizen.seed,
                 age: citizen.age,
                 words,

@@ -144,6 +144,14 @@ It is a ceiling of one that falls. A citizen with nothing the matter is at full 
 
 Nothing is charged for the ordinary cycle of a need. Warmth falls, a citizen goes to the fire, warmth climbs: that is control working, and it is free. What costs focus is a need past the mark where somebody is already acting on it and still going down, and the last of a need costs more than the first, because a need at a tenth is a different thing from a need at half. The word printed beside a citizen -- focused, unfocused, distracted, badly distracted -- is a name for the number and nothing in the simulation reads it.
 
+### How somebody is bearing up
+
+Separate from focus, and deliberately so. Focus is what is wrong with a citizen and it decides what they are worth at the work; mood is how they are taking it, and one day it will decide what they vote for. Fusing the two would make every vote a referendum on productivity, so they are two numbers with two readers and neither reads the other.
+
+A mood is two numbers as well. There is where it is headed, which is worked out instantly from everything the citizen is holding -- cold, hungry, worn out, badly matched to their work, somebody gone and not come back, a colony with something put by. Each of those is a named thing rather than a figure folded into a total, so the colony can say why somebody is low and not only that they are. And there is the number itself, which chases that target rather than jumping to it, faster upward than down, and stands still while its owner is asleep. The rates are per day: at an hour a tick, a mood that moved by the hour would sit on its target permanently and the chase would be arithmetic with nothing on the end of it.
+
+Nothing acts on a mood yet. The ballot keeps its own two currencies -- what a need cost somebody and what a walk wasted -- until there is a layer that gives a mood somewhere to go. It is printed first so that what is happening to people is visible before anything happens because of it.
+
 ### The year
 
 The air outside the generator's reach follows the calendar: a cosine through the year, mildest in the middle of summer and harshest in the middle of winter, drifting a little each day rather than stepping at a season boundary. A colony gets one winter to learn on -- the first is scaled back and the cold reaches full depth by the third -- and the ramp is on the cold half only, so summers do not get worse with the years.

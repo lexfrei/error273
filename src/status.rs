@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use crate::sim::{
     ADULT_AGE, BUILDING_COUNT, BUILDINGS, Ballot, Building, CENTER, Calendar, Cargo, Construction,
     FRAILTY_ONSET, Focus, Missing, NEAR_GROUND, Outside, Patches, Regard, STAT_COUNT, STATS,
-    Stores, couples, is_adult,
+    Stores, THOUGHT_COUNT, THOUGHTS, Thought, couples, is_adult,
 };
 
 pub const STATUS_LINES: usize = 5;
@@ -76,6 +76,10 @@ pub struct CitizenCard {
     /// three stats it is not an estimate and not hidden: anybody watching a
     /// citizen can see they are distracted.
     pub focus: Focus,
+    /// How they are bearing up, and what they are holding that makes them.
+    /// Printed rather than acted on: nothing in the colony reads a mood yet.
+    pub mood: f32,
+    pub held: [bool; THOUGHT_COUNT],
 }
 
 /// The five lines under the map, and the whole of what the headless build
@@ -152,7 +156,7 @@ pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
         ),
         match &status.card {
             Some(card) => format!(
-                "eldest #{:<3} {:2.0}y  {}  {:<16} watched {:3.0}d {}",
+                "eldest #{:<3} {:2.0}y  {}  {:<16} mood {:3.0} {:<28} watched {:3.0}d {}",
                 card.seed,
                 card.age,
                 STATS
@@ -165,6 +169,13 @@ pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
                     .collect::<Vec<String>>()
                     .join(" "),
                 card.focus.name(),
+                card.mood,
+                THOUGHTS
+                    .into_iter()
+                    .filter(|thought| card.held[*thought as usize])
+                    .map(Thought::name)
+                    .collect::<Vec<&str>>()
+                    .join(", "),
                 card.watched,
                 if card.known { "" } else { "(a guess)" }
             ),
