@@ -1,6 +1,6 @@
 # error273
 
-A zero-player game. A generator burns wood in the middle of a frozen disc, citizens haul wood and game in from the rim, sleep in the houses they built, eat what they hunted, vote on what to put up next, raise children, and grow old. There is no input and no way to intervene. The treelines and hunting grounds grow back in the seasons that allow it, so a colony that keeps within its means can live through winter after winter, and one that outgrows the hands it has to feed itself does not. Rust on Bevy 0.19, running headless (`default_app`, no window, no GPU); the only output is ASCII redrawn to the terminal with ANSI escapes.
+A zero-player game. A generator burns wood in the middle of a frozen world with no edge, citizens haul wood and game in from the ground around it, sleep in the houses they built, eat what they hunted, vote on what to put up next, raise children, and grow old. There is no input and no way to intervene. The treelines and hunting grounds grow back in the seasons that allow it, so a colony that keeps within its means can live through winter after winter, and one that outgrows the hands it has to feed itself does not. Rust on Bevy 0.19: the default build draws ASCII on square cells in a window, and building without it leaves the same simulation printing status lines to stdout and nothing else.
 
 ## A frame
 
@@ -48,7 +48,7 @@ House  14  Hut   0  Boiler   0  project none  vote 28/2/0
 under 15   2  grown  20  over 40  10  couples  12
 ```
 
-The map below is the window's glyph set; the four lines under it are exactly what the headless build prints.
+The map below is the window's glyph set; the five lines under it are exactly what the headless build prints.
 
 | Symbol | Meaning |
 | --- | --- |
@@ -67,7 +67,7 @@ The map below is the window's glyph set; the four lines under it are exactly wha
 | `z` | a citizen asleep at home |
 | `.` | open ground |
 
-Five lines sit under the map. The first is the tick counter, the date it works out to, and the air outside the fire's reach. The second is the living population and the four quantities that decide the run: fuel in the generator, food in the granary, and the wood and game still standing within the ring a citizen looks in first. A total over the whole world would only report how far the colony has wandered, so those two columns are what it can reach rather than what exists. The third counts what has been built, names the project in progress with how much timber it has swallowed so far, and gives the last ballot as votes for house, hut and boiler in that order. The fourth is the age pyramid -- children, grown citizens, the frail -- how many couples the colony has, and the middle of the colony for each of the three stats. That last is an aggregate and not a reveal: what any one citizen is stays hidden.
+Five lines sit under the map. The first is the tick counter, the date it works out to, and the air outside the fire's reach. The second is the living population, how many of them are working past the edge of the frame, and the four quantities that decide the run: fuel in the generator, food in the granary, and the wood and game still standing within the ring a citizen looks in first. A total over the whole world would only report how far the colony has wandered, so those two columns are what it can reach rather than what exists. The third counts what has been built, names the project in progress with how much timber it has swallowed so far, and gives the last ballot as votes for house, hut and boiler in that order. The fourth is the age pyramid -- children, grown citizens, the frail -- how many couples the colony has, and the middle of the colony for each of the three stats. That last is an aggregate and not a reveal: what any one citizen is stays hidden.
 
 ## Running it
 
@@ -108,7 +108,7 @@ cargo test
 
 ### In a window
 
-A terminal character box is about twice as tall as it is wide, which draws the disc as an oval. The window renderer puts the same glyphs on square cells, so the disc is round, and tints each cell's background by how warm that square is: near-black at ambient, ember close to a fed generator, cooling again as the fuel runs down. The status lines sit under the map as before.
+A terminal character box is about twice as tall as it is wide, so a step sideways reads as shorter than a step down. The window renderer puts the same glyphs on square cells, so distances read true, and tints each cell's background by how warm that square is: near-black at ambient, ember close to a fed generator, cooling again as the fuel runs down. The status lines sit under the map as before.
 
 ```bash
 cargo run --features window
@@ -118,7 +118,7 @@ The feature is off by default. Without it the build stays headless, on the depen
 
 ## What the simulation does
 
-The generator sits at the hearth and everything the colony builds goes up on rings around it. The ground beyond carries the treelines and hunting grounds, and it does not stop: the window shows the cells nearest the hearth, and citizens walk off its edges.
+The generator sits at the hearth and everything the colony builds goes up on rings around it. The ground beyond carries the treelines and hunting grounds, and it does not stop. The window is a frame on that world rather than the whole of it: it holds the twenty-four cells around the hearth that a citizen looks for work in, and anyone who goes further is off the frame and counted on the status line instead of drawn.
 
 One tick is a game hour, twenty-four hours a day, thirty days a season, four seasons a year. Every rate below is written in those units in the source and converted through the clock, so the real-time tempo and the length of a day are separate knobs.
 

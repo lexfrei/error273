@@ -5,8 +5,8 @@
 use bevy::prelude::*;
 
 use crate::sim::{
-    BUILDINGS, Cargo, Citizen, Patches, Regard, STAT_COUNT, STATS, Structure, estimate, is_known,
-    median, regard_of, world_is_bounded,
+    BUILDINGS, Cargo, Citizen, Patches, Pos, Regard, STAT_COUNT, STATS, Structure, estimate,
+    is_known, median, on_frame, regard_of, world_is_bounded,
 };
 use crate::status::{CitizenCard, Readings, Status, status_lines};
 
@@ -20,7 +20,12 @@ pub fn hold_the_world_bound(patches: Res<Patches>) {
     );
 }
 
-pub fn print_status(readings: Readings, structures: Query<&Structure>, citizens: Query<&Citizen>) {
+pub fn print_status(
+    readings: Readings,
+    structures: Query<&Structure>,
+    citizens: Query<&Citizen>,
+    walkers: Query<&Pos, With<Citizen>>,
+) {
     let mut buildings = [0usize; BUILDINGS.len()];
     for structure in &structures {
         buildings[structure.0 as usize] += 1;
@@ -60,6 +65,7 @@ pub fn print_status(readings: Readings, structures: Query<&Structure>, citizens:
         calendar: *readings.outside.calendar,
         ambient: readings.outside.air.ambient,
         alive: ages.len(),
+        off_frame: walkers.iter().filter(|pos| !on_frame(pos.0)).count(),
         fuel: readings.stores.generator.fuel,
         food: readings.stores.granary.food,
         wood: readings.standing(Cargo::Wood),

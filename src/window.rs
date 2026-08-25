@@ -13,7 +13,8 @@ use bevy::window::WindowResolution;
 
 use crate::sim::{
     Air, BUILDINGS, Building, CENTER, Cargo, Citizen, Construction, GENERATOR_HEAT, NeedKind,
-    Patches, Pos, R, Regard, STAT_COUNT, STATS, Structure, estimate, is_known, median, regard_of,
+    Patches, Pos, Regard, STAT_COUNT, STATS, Structure, VIEW_RADIUS, estimate, is_known, median,
+    on_frame, regard_of,
 };
 use crate::status::{CitizenCard, Readings, STATUS_LINES, Status, status_lines};
 
@@ -21,12 +22,12 @@ use crate::status::{CitizenCard, Readings, STATUS_LINES, Status, status_lines};
 /// map wherever it is run from.
 const FACE: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 
-const GRID: usize = (R * 2 + 1) as usize;
+const GRID: usize = (VIEW_RADIUS * 2 + 1) as usize;
 /// Square, which is the whole point of this renderer.
-const CELL: f32 = 22.0;
+const CELL: f32 = 18.0;
 const MAP_SPAN: f32 = GRID as f32 * CELL;
 
-const GLYPH_SIZE: f32 = 18.0;
+const GLYPH_SIZE: f32 = 15.0;
 const STATUS_SIZE: f32 = 15.0;
 const STATUS_LEAD: f32 = 22.0;
 const MARGIN: f32 = 14.0;
@@ -123,7 +124,7 @@ fn spawn_board(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
     ));
     for y in 0..GRID {
         for x in 0..GRID {
-            let cell = Cell(IVec2::new(x as i32, y as i32));
+            let cell = Cell(CENTER + IVec2::new(x as i32, y as i32) - IVec2::splat(VIEW_RADIUS));
             let at = world_of(cell.0);
             commands.spawn((
                 cell,
@@ -164,23 +165,17 @@ fn paint_map(
     mut tiles: Query<(&Cell, &mut Sprite)>,
     mut glyphs: Query<(&Cell, &mut Text2d, &mut TextColor)>,
 ) {
-    let mut grid = vec![vec![NOTHING; GRID]; GRID];
-    for (y, row) in grid.iter_mut().enumerate() {
-        for (x, cell) in row.iter_mut().enumerate() {
-            if inside(IVec2::new(x as i32, y as i32)) {
-                *cell = FLOOR;
-            }
-        }
-    }
-    // The world reaches past the board now, and citizens walk out with it, so
-    // everything painted is clipped to what the board can hold. The board
-    // becomes a viewport that follows the colony in a later pass.
+    let mut grid = vec![vec![FLOOR; GRID]; GRID];
+    // The frame is a window on a world that does not stop at its edges, so
+    // anything standing outside it is simply not painted. The status line says
+    // how many citizens that is.
     let mark_at = |grid: &mut Vec<Vec<Mark>>, at: IVec2, mark: Mark| {
-        if (0..GRID as i32).contains(&at.x) && (0..GRID as i32).contains(&at.y) {
-            grid[at.y as usize][at.x as usize] = mark;
+        if on_frame(at) {
+            let framed = at - CENTER + IVec2::splat(VIEW_RADIUS);
+            grid[framed.y as usize][framed.x as usize] = mark;
         }
     };
-    for patch in patches.seen(CENTER, R) {
+    for patch in patches.seen(CENTER, VIEW_RADIUS) {
         mark_at(&mut grid, patch.pos, patch_mark(patch.kind, patch.amount));
     }
     for (pos, structure) in &structures {
@@ -202,7 +197,8 @@ fn paint_map(
         }
     }
     for (cell, mut text, mut ink) in &mut glyphs {
-        let mark = grid[cell.0.y as usize][cell.0.x as usize];
+        let framed = cell.0 - CENTER + IVec2::splat(VIEW_RADIUS);
+        let mark = grid[framed.y as usize][framed.x as usize];
         if !text.starts_with(mark.glyph) {
             text.clear();
             text.push(mark.glyph);
@@ -218,6 +214,7 @@ fn paint_status(
     readings: Readings,
     structures: Query<&Structure>,
     citizens: Query<&Citizen>,
+    walkers: Query<&Pos, With<Citizen>>,
     mut lines: Query<(&StatusLine, &mut Text2d)>,
 ) {
     let mut buildings = [0usize; BUILDINGS.len()];
@@ -259,6 +256,7 @@ fn paint_status(
         calendar: *readings.outside.calendar,
         ambient: readings.outside.air.ambient,
         alive: ages.len(),
+        off_frame: walkers.iter().filter(|pos| !on_frame(pos.0)).count(),
         fuel: readings.stores.generator.fuel,
         food: readings.stores.granary.food,
         wood: readings.standing(Cargo::Wood),
@@ -282,21 +280,17 @@ fn paint_status(
     }
 }
 
-/// The sim counts rows downwards from the top; the screen counts upwards.
+/// The sim counts rows downwards from the top; the screen counts upwards. The
+/// frame is locked to the hearth, so a cell's place on screen is its offset
+/// from it.
 fn world_of(p: IVec2) -> Vec2 {
-    Vec2::new((p.x - R) as f32 * CELL, (R - p.y) as f32 * CELL)
+    let from_hearth = p - CENTER;
+    Vec2::new(from_hearth.x as f32 * CELL, -from_hearth.y as f32 * CELL)
 }
 
-fn inside(p: IVec2) -> bool {
-    p.as_vec2().distance(CENTER.as_vec2()) <= R as f32 + 0.5
-}
-
-/// Warmth as a background: the disc carries the heat map, the outside stays
-/// flat so the round shape reads at a glance.
+/// Warmth as a background. Every cell in the frame gets the heat map now: there
+/// is no outside to leave flat, only ground the frame does not reach.
 fn ground_of(p: IVec2, air: Air) -> Color {
-    if !inside(p) {
-        return VOID;
-    }
     let warmth = ((air.heat_at(p) - air.ambient) / GENERATOR_HEAT).clamp(0.0, 1.0);
     if warmth < 0.5 {
         FROST.mix(&EMBER, warmth * 2.0).into()

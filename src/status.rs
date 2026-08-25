@@ -41,6 +41,9 @@ pub struct Status {
     pub calendar: Calendar,
     pub ambient: f32,
     pub alive: usize,
+    /// Citizens working past the edge of the frame. The window cannot show them
+    /// and the headless build has no frame at all, so both report the count.
+    pub off_frame: usize,
     pub fuel: u32,
     pub food: u32,
     pub wood: u32,
@@ -110,8 +113,8 @@ pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
             status.ambient
         ),
         format!(
-            "pop {:3}  fuel {:4}  food {:4}  wood {:4}  game {:4}",
-            status.alive, status.fuel, status.food, status.wood, status.game
+            "pop {:3}  out {:2}  fuel {:4}  food {:4}  wood {:4}  game {:4}",
+            status.alive, status.off_frame, status.fuel, status.food, status.wood, status.game
         ),
         format!(
             "{}  project {}  vote {}",

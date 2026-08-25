@@ -190,6 +190,16 @@ pub const FOUNDING_REACH: i32 = 1;
 pub const SEARCH_RADII: [i32; 3] = [24, 64, RICHNESS_BEST];
 /// How far around a citizen the world is kept in memory between seasons.
 pub const FORGET_BEYOND: i32 = SEARCH_RADII[1];
+/// How much of the world the window shows around the hearth. It is the ring a
+/// citizen looks for work in, so the frame holds the ground the colony actually
+/// works and not a shape the world used to have.
+pub const VIEW_RADIUS: i32 = SEARCH_RADII[0];
+
+/// Whether a cell is one the window draws. The world has no edge, so this is a
+/// statement about the frame and never about where anybody may walk.
+pub fn on_frame(cell: IVec2) -> bool {
+    (cell - CENTER).abs().max_element() <= VIEW_RADIUS
+}
 /// The most of the world the colony may be holding at once, in cells. It is a
 /// ceiling on memory, not on where anybody can walk: a colony that keeps moving
 /// draws chunks as it goes and drops the ones behind it, so what it holds has
@@ -5733,5 +5743,41 @@ mod tests {
                 world.realised()
             );
         }
+    }
+
+    #[test]
+    fn the_frame_holds_every_cell_the_old_disc_did() {
+        for x in -R..=R {
+            for y in -R..=R {
+                let cell = CENTER + IVec2::new(x, y);
+                if cell.as_vec2().distance(CENTER.as_vec2()) <= R as f32 {
+                    assert!(on_frame(cell), "the frame lost a cell the disc held");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_frame_holds_the_ring_a_citizen_looks_in_first() {
+        let edge = CENTER + IVec2::new(SEARCH_RADII[0], SEARCH_RADII[0]);
+        assert!(
+            on_frame(edge),
+            "the corner of the working ring must be watchable"
+        );
+        assert!(
+            !on_frame(edge + IVec2::splat(1)),
+            "and the frame has to end somewhere, or it is a board again"
+        );
+    }
+
+    #[test]
+    fn a_citizen_out_past_the_frame_is_counted_rather_than_lost() {
+        let out = [
+            CENTER,
+            CENTER + IVec2::new(VIEW_RADIUS, 0),
+            CENTER + IVec2::new(VIEW_RADIUS + 1, 0),
+            CENTER - IVec2::new(0, VIEW_RADIUS + 40),
+        ];
+        assert_eq!(out.iter().filter(|cell| !on_frame(**cell)).count(), 2);
     }
 }
