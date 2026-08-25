@@ -199,3 +199,64 @@ fn stat_word(stat: crate::sim::Stat) -> &'static str {
         crate::sim::Stat::Hardiness => "hard",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::{MOOD_BASE, calendar_at};
+
+    /// The page carries a sample of these lines, and a sample is a copy that
+    /// nothing keeps in step. Three times now a reading has been added here and
+    /// the copy has gone on printing the old shape, caught by somebody reading
+    /// rather than by anything checking. This checks it: every word the lines
+    /// print has to appear in the page's sample, so a new reading either gets
+    /// into the sample or fails here.
+    #[test]
+    fn the_page_shows_every_reading_the_build_prints() {
+        let page = include_str!("../README.md");
+        let sample = page
+            .split("```text")
+            .nth(1)
+            .expect("the page has a sample of a run in it");
+        let shown = Status {
+            tick: 0,
+            calendar: calendar_at(0),
+            ambient: 0.0,
+            alive: 1,
+            off_frame: 0,
+            missing: 0,
+            fuel: 0,
+            food: 0,
+            wood: 0,
+            game: 0,
+            buildings: [0; BUILDING_COUNT],
+            project: None,
+            tally: [0.0; BUILDING_COUNT],
+            ages: vec![30.0],
+            stats: [0.5; STAT_COUNT],
+            mood: MOOD_BASE,
+            card: Some(CitizenCard {
+                seed: 1,
+                age: 30.0,
+                words: [Regard::Middling; STAT_COUNT],
+                watched: 0.0,
+                known: true,
+                focus: Focus::Focused,
+                mood: MOOD_BASE,
+                held: [true; THOUGHT_COUNT],
+                hardship: Hardship::Untouched,
+            }),
+        };
+        for line in status_lines(&shown) {
+            for word in line.split_whitespace() {
+                if !word.chars().all(|c| c.is_ascii_lowercase()) {
+                    continue;
+                }
+                assert!(
+                    sample.contains(word),
+                    "the page's sample never says `{word}`, so it is showing an older build"
+                );
+            }
+        }
+    }
+}

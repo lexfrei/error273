@@ -57,8 +57,8 @@ A zero-player game. A generator burns wood in the middle of a frozen world with 
 tick   356  year 1  Spring  day 15  hour 20  air -26
 pop  32  out  0  missing  0  fuel   64  food   47  wood 1329  game  796
 House  17  Hut   0  Boiler   0  Post   0  project House 0/12  vote 26/1/0/0
-under 15   2  grown  20  over 40  10  couples  12  raised 0.52/0.46/0.53
-eldest #30  52y  str fair   wit good   hard fair    watched  11d (a guess)
+under 15   2  grown  20  over 40  10  couples  12  raised 0.52/0.46/0.53  mood  50
+eldest #30  52y  str fair   wit good   hard fair    focused          mood  50 untouched wrong work, plenty           watched  11d (a guess)
 ```
 
 That is the whole frame: forty-nine cells across, the hearth in the middle, and world in every direction past its edges. The glyphs are the window's, listed below; the five lines under the map are exactly what the headless build prints.
