@@ -172,7 +172,7 @@ What a body lost it can partly make back. Strength and hardiness keep a catch-up
 
 Hardiness is the one a citizen keeps working on. A body left out in air below freezing learns the cold over a season and forgets it again over three, on top of whatever the childhood set, so a colony that works its haulers through winters is a colony of people who stand them better -- and a mild few years takes it back. What stands between a citizen and a cold night is therefore three things at once: what age has left them, what they were raised on, and what the winters since have taught them.
 
-Two children of one good decade still come out different, because a share of who anybody turns out to be is not something the colony did or could have watched. Somebody who walks in already grown has only that share, since the colony never saw their childhood: that is what the founding party is made of.
+How long a citizen lives is settled the day their childhood ends, not the day it began: what the colony raised in them, and a part it cannot account for, weighed against each other by how comfortable the colony was while raising them. A colony that was short of everything can read the differences between its people straight off the granary; a comfortable one raises people who differ for reasons it never saw. So two children of one good decade still come out different, and somebody who walks in already grown has only that unaccountable part, since the colony never saw their childhood -- which is what the founding party is made of.
 
 ### Growing
 

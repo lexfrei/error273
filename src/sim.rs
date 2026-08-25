@@ -190,6 +190,15 @@ pub const STAT_SALT: u64 = 0x51;
 pub const ACCLIMATION_WORTH: f32 = 0.15;
 pub const ACCLIMATION_GAIN: f32 = per_season(1.0);
 pub const ACCLIMATION_LOSS: f32 = per_season(1.0 / 3.0);
+// How much of a span the colony cannot account for, at the lean end and the fat
+// end. Scarr-Rowe, taken as a stylised rule rather than a transferred number:
+// shared environment explained roughly sixty per cent of the variance in
+// impoverished families and near zero in affluent ones, so the direction is the
+// finding and the endpoints are ours.
+pub const RESIDUAL_SHARE_LEAN: f32 = 0.2;
+pub const RESIDUAL_SHARE_FAT: f32 = 0.8;
+/// How far a childhood can move a span either way.
+pub const LIFESPAN_RAISED_SWING: f32 = 0.2;
 // How much more than it spends a colony must be able to fetch before it takes
 // on another mouth. The rate it is judged on is a season's average, and the
 // season that binds is the one that puts nothing back, so this margin is the
@@ -327,6 +336,11 @@ pub struct Upbringing {
     warmth: f32,
     food: f32,
     hours: f32,
+    /// The whole childhood rather than the current stage, which is what decides
+    /// how much of the citizen the colony can claim credit for.
+    lived_warmth: f32,
+    lived_food: f32,
+    lived_hours: f32,
     settled: usize,
 }
 
@@ -338,6 +352,9 @@ impl Upbringing {
             warmth: 0.0,
             food: 0.0,
             hours: 0.0,
+            lived_warmth: 0.0,
+            lived_food: 0.0,
+            lived_hours: 0.0,
             settled: 0,
         }
     }
@@ -359,6 +376,18 @@ impl Upbringing {
         self.warmth += warmth;
         self.food += food;
         self.hours += 1.0;
+        self.lived_warmth += warmth;
+        self.lived_food += food;
+        self.lived_hours += 1.0;
+    }
+
+    /// How good the whole childhood was. A childhood nobody watched reads as
+    /// neither good nor bad, which is the only honest answer for a migrant.
+    pub fn prosperity(&self) -> f32 {
+        if self.lived_hours == 0.0 {
+            return FORMATION_NEUTRAL;
+        }
+        (self.lived_warmth + self.lived_food) / (2.0 * self.lived_hours)
     }
 
     /// Settle every milestone the child has reached, on the given stage.
@@ -376,15 +405,18 @@ impl Upbringing {
 
     /// Settle on what has actually been banked since the last milestone, and
     /// start the next stage's ledger clean.
-    pub fn settle_due(&mut self, age: f32) {
+    /// Returns whether this is the settling that finished the childhood, which
+    /// is when a citizen's span stops being a guess.
+    pub fn settle_due(&mut self, age: f32) -> bool {
         if self.settled >= MILESTONE_COUNT || age < MILESTONE_AGES[self.settled] {
-            return;
+            return false;
         }
         let hours = self.hours.max(1.0);
         self.resolve(age, self.warmth / hours, self.food / hours);
         self.warmth = 0.0;
         self.food = 0.0;
         self.hours = 0.0;
+        self.settled >= MILESTONE_COUNT
     }
 
     /// What a good adolescence can still buy back, diminishing with every year
@@ -836,11 +868,23 @@ pub fn noise(seed: u64, salt: u64) -> f32 {
     (z >> 40) as f32 / (1u64 << 24) as f32
 }
 
-/// The span a citizen would reach if nothing else got them first, scattered
-/// about the expected one so a founding party does not die together.
-pub fn lifespan_of(seed: u64) -> f32 {
-    let drift = (noise(seed, LIFESPAN_SALT) - 0.5) * 2.0 * LIFESPAN_SPREAD;
-    LIFESPAN_BASE * (1.0 + drift)
+/// How much of a citizen the colony cannot account for. A starving colony can
+/// read the differences between its people straight off the granary; a
+/// comfortable one raises people who differ for reasons it never saw.
+pub fn residual_share(prosperity: f32) -> f32 {
+    RESIDUAL_SHARE_LEAN + prosperity.clamp(0.0, 1.0) * (RESIDUAL_SHARE_FAT - RESIDUAL_SHARE_LEAN)
+}
+
+/// The span a citizen would reach if nothing else got them first: what the
+/// colony raised in them, and a part it cannot account for, weighed against
+/// each other by how comfortable the colony was while raising them.
+pub fn lifespan_of(seed: u64, raised: f32, prosperity: f32) -> f32 {
+    let earned = LIFESPAN_BASE
+        * (1.0 + (raised - FORMATION_NEUTRAL) / FORMATION_NEUTRAL * LIFESPAN_RAISED_SWING);
+    let unexplained =
+        LIFESPAN_BASE * (1.0 + (noise(seed, LIFESPAN_SALT) - 0.5) * 2.0 * LIFESPAN_SPREAD);
+    let share = residual_share(prosperity);
+    earned * (1.0 - share) + unexplained * share
 }
 
 /// How well a citizen still shrugs off a cold night. Whole while they are
@@ -1497,7 +1541,11 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
                 upbringing: Upbringing::grown(seed),
                 acclimated: 0.0,
                 age: founder_age(i, CITIZENS),
-                lifespan: lifespan_of(seed),
+                lifespan: lifespan_of(
+                    seed,
+                    Stats::migrant(seed).of(Stat::Hardiness),
+                    FORMATION_NEUTRAL,
+                ),
                 seed,
                 home,
                 carrying: None,
@@ -1536,7 +1584,15 @@ pub fn aging(mut citizens: Query<&mut Citizen>) {
             citizen.upbringing.observe(warmth, food);
         }
         let age = citizen.age;
-        citizen.upbringing.settle_due(age);
+        if citizen.upbringing.settle_due(age) {
+            // The childhood is over, so the span stops being the guess it was
+            // made with and becomes what the colony actually raised.
+            citizen.lifespan = lifespan_of(
+                citizen.seed,
+                citizen.upbringing.stats().of(Stat::Hardiness),
+                citizen.upbringing.prosperity(),
+            );
+        }
         citizen.upbringing.catch_up(age, warmth, food);
     }
 }
@@ -1755,7 +1811,11 @@ pub fn colony_growth(
                 upbringing: Upbringing::born(seed),
                 acclimated: 0.0,
                 age: 0.0,
-                lifespan: lifespan_of(seed),
+                lifespan: lifespan_of(
+                    seed,
+                    Stats::migrant(seed).of(Stat::Hardiness),
+                    FORMATION_NEUTRAL,
+                ),
                 seed,
                 home,
                 carrying: None,
@@ -3096,7 +3156,9 @@ mod tests {
 
     #[test]
     fn a_lifespan_is_near_the_expected_one_but_never_exactly_it() {
-        let spans: Vec<f32> = (0..500u64).map(lifespan_of).collect();
+        let spans: Vec<f32> = (0..500u64)
+            .map(|seed| lifespan_of(seed, FORMATION_NEUTRAL, 1.0))
+            .collect();
         for span in &spans {
             let drift = (span - LIFESPAN_BASE).abs() / LIFESPAN_BASE;
             assert!(
@@ -4099,6 +4161,100 @@ mod tests {
                 let resistance = cold_resistance(0.0, LIFESPAN_BASE, raised, acclimated);
                 assert!((0.0..=1.0).contains(&resistance));
             }
+        }
+    }
+
+    #[test]
+    fn a_comfortable_colony_cannot_account_for_its_own_people() {
+        assert!(residual_share(1.0) > residual_share(0.0));
+        assert!(
+            residual_share(0.0) > 0.0,
+            "even a starving colony does not explain everybody"
+        );
+        for prosperity in [-1.0, 0.0, 0.5, 1.0, 2.0] {
+            let share = residual_share(prosperity);
+            assert!(
+                (0.0..=1.0).contains(&share),
+                "share left its range at {prosperity}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_better_raised_citizen_outlives_a_worse_raised_one() {
+        let lean = 0.0;
+        assert!(
+            lifespan_of(9, STAT_MAX, lean) > lifespan_of(9, STAT_MIN, lean),
+            "in a colony that can account for its people, upbringing decides"
+        );
+    }
+
+    #[test]
+    fn a_starving_colony_can_read_its_people_off_the_granary() {
+        let told_by_upbringing = |prosperity: f32| {
+            lifespan_of(9, STAT_MAX, prosperity) - lifespan_of(9, STAT_MIN, prosperity)
+        };
+        assert!(
+            told_by_upbringing(0.0) > told_by_upbringing(1.0),
+            "and a comfortable one produces people who differ for reasons it cannot see"
+        );
+    }
+
+    #[test]
+    fn two_citizens_raised_alike_still_do_not_die_together() {
+        assert_ne!(
+            lifespan_of(21, FORMATION_NEUTRAL, 1.0),
+            lifespan_of(22, FORMATION_NEUTRAL, 1.0)
+        );
+    }
+
+    #[test]
+    fn a_span_stays_a_span() {
+        for seed in 0..200u64 {
+            for raised in [STAT_MIN, FORMATION_NEUTRAL, STAT_MAX] {
+                for prosperity in [0.0, 0.5, 1.0] {
+                    let span = lifespan_of(seed, raised, prosperity);
+                    assert!(
+                        span > FRAILTY_ONSET,
+                        "nobody is born already past frailty: {span}"
+                    );
+                    assert!(span < LIFESPAN_BASE * 2.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_childhood_remembers_how_good_the_whole_of_it_was() {
+        let mut childhood = Upbringing::born(4);
+        for _ in 0..100 {
+            childhood.observe(1.0, 1.0);
+        }
+        for _ in 0..100 {
+            childhood.observe(0.0, 0.0);
+        }
+        let prosperity = childhood.prosperity();
+        assert!(
+            (prosperity - 0.5).abs() < 0.01,
+            "half a childhood of plenty and half of want averages out, not {prosperity}"
+        );
+    }
+
+    #[test]
+    fn a_childhood_nobody_watched_reads_as_neither_good_nor_bad() {
+        assert_eq!(Upbringing::grown(4).prosperity(), FORMATION_NEUTRAL);
+    }
+
+    #[test]
+    fn settling_says_when_a_child_has_finished_becoming_someone() {
+        let mut childhood = Upbringing::born(6);
+        for age in MILESTONE_AGES {
+            let grown = childhood.settle_due(age);
+            assert_eq!(
+                grown,
+                age == ADULT_AGE,
+                "only the last milestone finishes a childhood"
+            );
         }
     }
 }
