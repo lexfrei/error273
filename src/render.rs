@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 
-use crate::sim::{CENTER, Citizen, Forest, Generator, House, Pos, R, Tick};
+use crate::sim::{
+    CENTER, Citizen, Construction, Forest, Generator, HOUSE_WOOD_COST, House, Pos, R, Tick,
+};
 
 pub fn clear_screen() {
     print!("\x1B[2J");
@@ -10,6 +12,7 @@ pub fn render(
     tick: Res<Tick>,
     generator: Res<Generator>,
     forest: Res<Forest>,
+    construction: Res<Construction>,
     houses: Query<&Pos, With<House>>,
     citizens: Query<(&Pos, &Citizen)>,
 ) {
@@ -29,6 +32,9 @@ pub fn render(
     for pos in &houses {
         grid[pos.0.y as usize][pos.0.x as usize] = 'H';
     }
+    if let Some(site) = &construction.site {
+        grid[site.pos.y as usize][site.pos.x as usize] = '+';
+    }
     for (pos, citizen) in &citizens {
         grid[pos.0.y as usize][pos.0.x as usize] = citizen_glyph(citizen, pos.0);
     }
@@ -41,11 +47,16 @@ pub fn render(
         out.push_str(&row.iter().collect::<String>());
         out.push('\n');
     }
+    let site = match &construction.site {
+        Some(site) => format!("{:2}/{}", site.delivered, HOUSE_WOOD_COST),
+        None => "  -  ".to_string(),
+    };
     out.push_str(&format!(
-        "tick {:5}  pop {:3}  houses {:3}  fuel {:4}  forest {:4}\n",
+        "tick {:5}  pop {:3}  houses {:3}  build {}  fuel {:4}  forest {:4}\n",
         tick.0,
         alive,
         houses.iter().count(),
+        site,
         generator.fuel,
         wood_left
     ));
