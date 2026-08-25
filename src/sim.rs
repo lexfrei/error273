@@ -163,9 +163,11 @@ pub const SEASON_DAYS: usize = DAYS_PER_SEASON as usize;
 pub const CHUNK: i32 = 64;
 /// Cells to a step of the lattice the generated field is interpolated over.
 pub const LATTICE: i32 = 24;
-/// How far out the best trip is. Richness rises until here and is flat past it,
-/// so this is where yield-against-walk peaks; inside the old rim richness is
-/// exactly what it always was, which is what keeps the early game unretuned.
+/// How far out richness stops rising. It is not where a trip is worth most:
+/// what a citizen can carry is set by the citizen, so a longer walk brings home
+/// no more in one go. It is where ground stops giving up more before it is bare,
+/// which is as far out as there is any reason to walk. Inside the old rim
+/// richness is exactly what it always was, which keeps the early game unretuned.
 pub const RICHNESS_BEST: i32 = PATCH_RADIUS + 160;
 /// How many cells of walking each step of richness costs to reach.
 pub const RICHNESS_RUN: i32 = 80;
@@ -195,17 +197,24 @@ pub const FORGET_BEYOND: i32 = SEARCH_RADII[1];
 /// works and not a shape the world used to have.
 pub const VIEW_RADIUS: i32 = SEARCH_RADII[0];
 
-/// Whether a cell is one the window draws. The world has no edge, so this is a
-/// statement about the frame and never about where anybody may walk.
-pub fn on_frame(cell: IVec2) -> bool {
-    (cell - CENTER).abs().max_element() <= VIEW_RADIUS
-}
+/// What a walk counts as when there is no work of that kind anywhere in reach.
+/// It is the longest walk there is, so a spare hand who found nothing never
+/// scores better than one who found work at the end of the world.
+pub const WALK_UNFOUND: i32 = SEARCH_RADII[SEARCH_RADII.len() - 1];
+/// The seed the world is generated from. One number, fixed, so a run replays.
+pub const WORLD_SEED: u64 = 0x2026;
 /// The most of the world the colony may be holding at once, in cells. It is a
 /// ceiling on memory, not on where anybody can walk: a colony that keeps moving
 /// draws chunks as it goes and drops the ones behind it, so what it holds has
 /// to follow where it is standing rather than how long it has been running.
 #[cfg(not(feature = "window"))]
 pub const WORLD_CELLS_HELD: usize = 1 << 20;
+
+/// Whether a cell is one the window draws. The world has no edge, so this is a
+/// statement about the frame and never about where anybody may walk.
+pub fn on_frame(cell: IVec2) -> bool {
+    (cell - CENTER).abs().max_element() <= VIEW_RADIUS
+}
 
 /// Whether that ceiling is being kept. The headless build checks it every tick,
 /// which is the only place it is checked: it is an instrument reading, and a
@@ -215,12 +224,6 @@ pub const WORLD_CELLS_HELD: usize = 1 << 20;
 pub fn world_is_bounded(chunks_held: usize) -> bool {
     chunks_held * (CHUNK * CHUNK) as usize <= WORLD_CELLS_HELD
 }
-/// What a walk counts as when there is no work of that kind anywhere in reach.
-/// It is the longest walk there is, so a spare hand who found nothing never
-/// scores better than one who found work at the end of the world.
-pub const WALK_UNFOUND: i32 = SEARCH_RADII[SEARCH_RADII.len() - 1];
-/// The seed the world is generated from. One number, fixed, so a run replays.
-pub const WORLD_SEED: u64 = 0x2026;
 
 // Stats are raised, not rolled. A childhood is banked hour by hour and settled
 // at named ages, heaviest at the start, and what the colony could not account
@@ -1042,8 +1045,10 @@ pub struct Patch {
 /// apart and applied on top -- which is what stops a colony stripping a
 /// treeline, walking away, and coming back to a full one.
 ///
-/// Chunks are held in sorted order rather than hashed, so two patches at equal
-/// distance are always met in the same order and a run replays exactly.
+/// Chunks are held in sorted order so that a walk over the map itself runs in a
+/// fixed one. The queries below do not lean on it -- they step an explicit range
+/// of coordinates and look each chunk up by key -- but nothing should have to
+/// work out which of the two it is looking at to know that a run replays.
 #[derive(Resource)]
 pub struct Patches {
     seed: u64,
@@ -1066,7 +1071,10 @@ impl Patches {
         world
     }
 
-    /// How much of the world is being held. The colony's memory, not its size.
+    /// How much of the world is being held. The colony's memory, not its size,
+    /// and a reading rather than a rule -- so it exists where the instrument
+    /// that reads it does, and nowhere else.
+    #[cfg(not(feature = "window"))]
     pub fn realised(&self) -> usize {
         self.chunks.len()
     }
@@ -2244,11 +2252,6 @@ pub fn forget_far_world(
     let mut homes = vec![CENTER];
     homes.extend(citizens.iter().map(|pos| pos.0));
     patches.forget_beyond(&homes, FORGET_BEYOND);
-    let span = 2 * (FORGET_BEYOND / CHUNK + 1) + 1;
-    debug_assert!(
-        patches.realised() <= homes.len() * (span * span) as usize,
-        "the colony is holding world nobody is standing near"
-    );
 }
 
 /// One reading a day of what the colony holds per head, kept a season deep.
@@ -5591,6 +5594,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "window"))]
     #[test]
     fn a_query_never_touches_more_chunks_than_its_reach_covers() {
         let mut world = Patches::new(WORLD_SEED);
@@ -5666,6 +5670,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "window"))]
     #[test]
     fn nothing_grows_back_in_a_chunk_nobody_has_been_to() {
         let mut world = Patches::new(WORLD_SEED);

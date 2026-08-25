@@ -60,10 +60,6 @@ struct Mark {
     ink: Color,
 }
 
-const NOTHING: Mark = Mark {
-    glyph: ' ',
-    ink: VOID,
-};
 const FLOOR: Mark = Mark {
     glyph: '.',
     ink: Color::srgb(0.30, 0.32, 0.38),
@@ -135,7 +131,7 @@ fn spawn_board(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
                 cell,
                 Text2d::new(" "),
                 TextFont::from_font_size(GLYPH_SIZE).with_font(font.clone()),
-                TextColor(NOTHING.ink),
+                TextColor(VOID),
                 Transform::from_xyz(at.x, at.y, 1.0),
             ));
         }
