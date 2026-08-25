@@ -938,7 +938,7 @@ pub fn colony_thrives(shares: [f32; NEED_COUNT], fuel: u32, food: u32) -> bool {
         && food >= BIRTH_FOOD_MIN
 }
 
-pub fn setup(mut commands: Commands) {
+pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
     let houses = CITIZENS.div_ceil(HOUSE_CAPACITY);
     let sites: Vec<IVec2> = (0..houses).filter_map(plot_site).collect();
     for site in &sites {
@@ -952,7 +952,9 @@ pub fn setup(mut commands: Commands) {
         };
         homes.push(home);
         let angle = i as f32 / CITIZENS as f32 * std::f32::consts::TAU;
-        let seed = i as u64 + 1;
+        // Every seed in the colony comes from here, founders included, or a
+        // newcomer would eventually be handed a founder's lifespan and rolls.
+        let seed = lineage.next();
         commands.spawn((
             Pos(ring_pos(START_RING, angle)),
             Citizen {
@@ -1094,14 +1096,19 @@ pub fn colony_growth(
     let pairs = couples(&ages);
     let chance = birth_chance_per_check(birth_chance_per_season(spare_beds(&sites, &homes), pairs));
 
-    for pair in 0..pairs {
-        let roll = noise(
-            lineage.0.wrapping_add(pair as u64),
-            BIRTH_SALT.wrapping_add(tick.0),
-        );
-        if roll >= chance {
-            continue;
-        }
+    // Every couple rolls against the same snapshot, so a birth part way through
+    // does not shift the rolls of the couples after it.
+    let round = lineage.0;
+    let expecting = (0..pairs)
+        .filter(|pair| {
+            noise(
+                round.wrapping_add(*pair as u64),
+                BIRTH_SALT.wrapping_add(tick.0),
+            ) < chance
+        })
+        .count();
+
+    for _ in 0..expecting {
         let Some(home) = free_home(&sites, &homes) else {
             break;
         };
@@ -2603,5 +2610,25 @@ mod tests {
             true,
         );
         assert_eq!(choose_duty(&cold, None, false), Duty::WarmUp);
+    }
+
+    #[test]
+    fn no_two_citizens_are_ever_handed_the_same_seed() {
+        let mut lineage = Lineage::default();
+        let seeds: Vec<u64> = (0..CITIZENS * 4).map(|_| lineage.next()).collect();
+        for (i, seed) in seeds.iter().enumerate() {
+            for other in &seeds[i + 1..] {
+                assert_ne!(
+                    seed, other,
+                    "shared seeds mean shared lifespans and shared rolls"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn seeds_are_handed_out_from_the_first_one() {
+        let mut lineage = Lineage::default();
+        assert_eq!(lineage.next(), 1, "there is no citizen zero");
     }
 }
