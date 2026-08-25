@@ -1,0 +1,2 @@
+# Paragraphs stay on one line so the renderer wraps them to the viewer's width.
+MD013: false
