@@ -256,6 +256,12 @@ pub fn should_start_building(diverting: bool, free_bed: bool) -> bool {
     diverting && !free_bed
 }
 
+/// Whether a log carried to `drop_off` becomes part of the house rather than
+/// fuel. Timber past what the house needs would be thrown away, so it burns.
+pub fn log_goes_to_site(drop_off: IVec2, site_pos: IVec2, delivered: u32) -> bool {
+    drop_off == site_pos && delivered < HOUSE_WOOD_COST
+}
+
 /// Share of the colony that is warm, and share that is not worn out.
 pub fn comfort_shares(people: &[(f32, f32)]) -> (f32, f32) {
     if people.is_empty() {
@@ -406,6 +412,8 @@ pub fn citizen_ai(
     // One reading for the whole tick, so a citizen's luck does not depend on the
     // order the deliveries happen to land in.
     let output = generator_output(generator.fuel);
+    let site_pos = construction.site.as_ref().map(|site| site.pos);
+    let drop_off = delivery_target(construction.diverting, site_pos);
     for (entity, mut pos, mut citizen) in &mut citizens {
         let at_home = pos.0 == citizen.home;
         let heat = heat_at(pos.0, output);
@@ -416,11 +424,11 @@ pub fn citizen_ai(
         }
         citizen.warming = update_warming(citizen.warming, citizen.warmth);
 
-        let site = construction.site.as_ref().map(|site| site.pos);
-        let drop_off = delivery_target(construction.diverting, site);
         if citizen.carrying && (pos.0 - drop_off).abs().max_element() <= 1 {
             match construction.site.as_mut() {
-                Some(site) if drop_off == site.pos => site.delivered += 1,
+                Some(site) if log_goes_to_site(drop_off, site.pos, site.delivered) => {
+                    site.delivered += 1;
+                }
                 _ => generator.fuel += 1,
             }
             citizen.carrying = false;
@@ -835,6 +843,20 @@ mod tests {
             duty_target(Duty::Gather, generator_output(0), home, drop_off, None),
             home,
             "once it is out, the only shelter left is their own roof"
+        );
+    }
+
+    #[test]
+    fn logs_past_what_the_house_needs_go_on_the_fire() {
+        let site = IVec2::new(5, 5);
+        assert!(log_goes_to_site(site, site, HOUSE_WOOD_COST - 1));
+        assert!(
+            !log_goes_to_site(site, site, HOUSE_WOOD_COST),
+            "a finished house must not swallow timber"
+        );
+        assert!(
+            !log_goes_to_site(CENTER, site, 0),
+            "wood headed for the fire stays there"
         );
     }
 }
