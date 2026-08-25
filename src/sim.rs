@@ -101,7 +101,7 @@ pub const CITIZENS: usize = 30;
 // Harvest patches sit on the rim, out past the last buildable house ring.
 pub const PATCH_RADIUS: i32 = R - 1;
 pub const WOOD_CELLS: usize = 8;
-pub const WOOD_PER_CELL: u32 = 40;
+pub const WOOD_PER_CELL: u32 = 50;
 pub const FOOD_CELLS: usize = 4;
 pub const FOOD_PER_CELL: u32 = 60;
 
@@ -240,6 +240,18 @@ impl Needs {
         }; NEED_COUNT];
         needs[NeedKind::Warmth as usize].level = START_WARMTH;
         Needs(needs)
+    }
+
+    /// A founder. Everyone starting equally fed means everyone crossing the
+    /// hunger threshold in the same hour, which is an artefact of setup rather
+    /// than anything true about the colony, so their hunger is staggered across
+    /// the party.
+    pub fn founder(index: usize, of: usize) -> Self {
+        let mut needs = Needs::newcomer();
+        let rules = NeedKind::Food.rules();
+        let along = (index + 1) as f32 / of.max(1) as f32;
+        needs.0[NeedKind::Food as usize].level = rules.low + along * (NEED_MAX - rules.low);
+        needs
     }
 
     pub fn get(&self, kind: NeedKind) -> Need {
@@ -596,7 +608,7 @@ pub fn setup(mut commands: Commands) {
         commands.spawn((
             Pos(ring_pos(2.0, angle)),
             Citizen {
-                needs: Needs::newcomer(),
+                needs: Needs::founder(i, CITIZENS),
                 home,
                 carrying: None,
                 hauling: Cargo::Wood,
@@ -1504,5 +1516,42 @@ mod tests {
             per_day(1.0) < per_hour(1.0),
             "a daily rate is the slower one"
         );
+    }
+
+    #[test]
+    fn founders_do_not_all_get_hungry_in_the_same_hour() {
+        let low = NeedKind::Food.rules().low;
+        let levels: Vec<f32> = (0..CITIZENS)
+            .map(|i| Needs::founder(i, CITIZENS).level(NeedKind::Food))
+            .collect();
+        for level in &levels {
+            assert!(*level > low, "no founder starts the run already hungry");
+            assert!(*level <= NEED_MAX);
+        }
+        let highest = levels.iter().copied().fold(f32::MIN, f32::max);
+        let lowest = levels.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            highest - lowest > (NEED_MAX - low) / 2.0,
+            "the stagger must cover most of the band, or they still queue together"
+        );
+    }
+
+    #[test]
+    fn a_founder_is_a_newcomer_in_every_other_respect() {
+        let founder = Needs::founder(0, CITIZENS);
+        let newcomer = Needs::newcomer();
+        assert_eq!(
+            founder.level(NeedKind::Warmth),
+            newcomer.level(NeedKind::Warmth)
+        );
+        assert_eq!(
+            founder.level(NeedKind::Rest),
+            newcomer.level(NeedKind::Rest)
+        );
+    }
+
+    #[test]
+    fn a_party_of_one_does_not_divide_by_zero() {
+        assert!(Needs::founder(0, 0).level(NeedKind::Food).is_finite());
     }
 }

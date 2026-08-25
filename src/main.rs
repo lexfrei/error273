@@ -14,7 +14,7 @@ fn main() {
         .init_resource::<Calendar>()
         .init_resource::<Construction>()
         .insert_resource(Generator { fuel: 20 })
-        .insert_resource(Granary { food: 30 })
+        .insert_resource(Granary { food: 60 })
         .add_systems(Startup, (render::clear_screen, sim::setup).chain())
         .add_systems(
             Update,
