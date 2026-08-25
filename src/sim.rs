@@ -1,5 +1,6 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use std::collections::BTreeMap;
 
 // Nested game clocks. How fast a tick arrives in real time is a separate knob
 // in the app wiring; these four numbers define game time and nothing else.
@@ -181,6 +182,14 @@ pub const CHUNK_SALT: u64 = 0x61;
 pub const FIELD_SALT: u64 = 0x62;
 /// How many chunks out from the hearth's own the colony starts with realised.
 pub const FOUNDING_REACH: i32 = 1;
+/// How far a citizen looks for work, widening only when the ground inside the
+/// last ring is bare. The rings are what bounds the search: a query never meets
+/// more patches than the chunks one box covers, whatever the world has grown to.
+/// The furthest is where richness stops rising, since nobody walks past ground
+/// that is no better for the walk.
+pub const SEARCH_RADII: [i32; 3] = [24, 64, RICHNESS_BEST];
+/// How far around a citizen the world is kept in memory between seasons.
+pub const FORGET_BEYOND: i32 = SEARCH_RADII[1];
 /// The seed the world is generated from. One number, fixed, so a run replays.
 pub const WORLD_SEED: u64 = 0x2026;
 
@@ -980,7 +989,6 @@ pub struct Colony<'w> {
 pub struct Stores<'w> {
     pub generator: Res<'w, Generator>,
     pub granary: Res<'w, Granary>,
-    pub patches: Res<'w, Patches>,
 }
 
 #[derive(Resource, Default)]
@@ -997,8 +1005,140 @@ pub struct Patch {
     pub cap: u32,
 }
 
+/// The world as the colony has met it.
+///
+/// A chunk is realised the first time somebody looks inside it and may be
+/// dropped again when nobody is near, because the seed can always redraw it.
+/// What the colony took is the one thing the seed cannot know, so it is kept
+/// apart and applied on top -- which is what stops a colony stripping a
+/// treeline, walking away, and coming back to a full one.
+///
+/// Chunks are held in sorted order rather than hashed, so two patches at equal
+/// distance are always met in the same order and a run replays exactly.
 #[derive(Resource)]
-pub struct Patches(pub Vec<Patch>);
+pub struct Patches {
+    seed: u64,
+    chunks: BTreeMap<(i32, i32), Vec<Patch>>,
+    worked: BTreeMap<(i32, i32), u32>,
+}
+
+fn key(at: IVec2) -> (i32, i32) {
+    (at.x, at.y)
+}
+
+impl Patches {
+    pub fn new(seed: u64) -> Self {
+        let mut world = Self {
+            seed,
+            chunks: BTreeMap::new(),
+            worked: BTreeMap::new(),
+        };
+        world.realise_around(CENTER, FOUNDING_REACH * CHUNK);
+        world
+    }
+
+    /// How much of the world is being held. The colony's memory, not its size.
+    pub fn realised(&self) -> usize {
+        self.chunks.len()
+    }
+
+    fn realise(&mut self, chunk: IVec2) {
+        if self.chunks.contains_key(&key(chunk)) {
+            return;
+        }
+        let mut patches = chunk_patches(self.seed, chunk);
+        for patch in &mut patches {
+            if let Some(left) = self.worked.get(&key(patch.pos)) {
+                patch.amount = *left;
+            }
+        }
+        self.chunks.insert(key(chunk), patches);
+    }
+
+    fn realise_around(&mut self, at: IVec2, radius: i32) {
+        let low = chunk_of(at - IVec2::splat(radius));
+        let high = chunk_of(at + IVec2::splat(radius));
+        for x in low.x..=high.x {
+            for y in low.y..=high.y {
+                self.realise(IVec2::new(x, y));
+            }
+        }
+    }
+
+    /// What stands within a reach of here, drawing the world if it has not been
+    /// asked for yet.
+    pub fn reach(&mut self, at: IVec2, radius: i32) -> impl Iterator<Item = &Patch> {
+        self.realise_around(at, radius);
+        self.seen(at, radius)
+    }
+
+    /// What stands within a reach of here that the colony has already met.
+    /// Reading the world never makes more of it.
+    pub fn seen(&self, at: IVec2, radius: i32) -> impl Iterator<Item = &Patch> {
+        let low = chunk_of(at - IVec2::splat(radius));
+        let high = chunk_of(at + IVec2::splat(radius));
+        (low.x..=high.x)
+            .flat_map(move |x| (low.y..=high.y).map(move |y| (x, y)))
+            .filter_map(move |chunk| self.chunks.get(&chunk))
+            .flatten()
+            .filter(move |patch| (patch.pos - at).abs().max_element() <= radius)
+    }
+
+    fn patch_at(&mut self, pos: IVec2) -> Option<&mut Patch> {
+        self.realise(chunk_of(pos));
+        self.chunks
+            .get_mut(&key(chunk_of(pos)))?
+            .iter_mut()
+            .find(|patch| patch.pos == pos)
+    }
+
+    /// Strips a patch of what a hauler actually lifted, and hands back what was
+    /// there to lift. What leaves the ground has to equal what reaches the store.
+    pub fn take(&mut self, pos: IVec2, wanted: u32) -> u32 {
+        let Some(patch) = self.patch_at(pos) else {
+            return 0;
+        };
+        let taken = wanted.min(patch.amount);
+        patch.amount -= taken;
+        let left = patch.amount;
+        if taken > 0 {
+            self.worked.insert(key(pos), left);
+        }
+        taken
+    }
+
+    /// A day's growing back, over the world the colony is holding. Ground it has
+    /// never been to does not grow, because it was never taken from.
+    pub fn regrow(&mut self, growing: bool) {
+        if !growing {
+            return;
+        }
+        for patches in self.chunks.values_mut() {
+            for patch in patches.iter_mut() {
+                patch.amount = regrowth_step(patch.amount, patch.cap, patch.kind, true);
+                // A patch back at its cap is what the seed already says it is,
+                // so remembering it is remembering nothing.
+                if patch.amount == patch.cap {
+                    self.worked.remove(&key(patch.pos));
+                } else if let Some(left) = self.worked.get_mut(&key(patch.pos)) {
+                    *left = patch.amount;
+                }
+            }
+        }
+    }
+
+    /// Drops the world nobody is standing near. What was taken survives, so a
+    /// chunk asked for again comes back as it was left rather than as new.
+    pub fn forget_beyond(&mut self, homes: &[IVec2], radius: i32) {
+        let span = radius / CHUNK + 1;
+        self.chunks.retain(|(x, y), _| {
+            homes.iter().any(|home| {
+                let near = chunk_of(*home);
+                (near.x - x).abs() <= span && (near.y - y).abs() <= span
+            })
+        });
+    }
+}
 
 /// The colony runs one project at a time; wood carried there is wood not burned.
 #[derive(Resource, Default)]
@@ -1455,40 +1595,44 @@ pub fn haul_choice(current: Cargo, supply: Supply) -> Cargo {
 
 /// The nearest patch a citizen can work: their own kind if any still stands,
 /// otherwise whatever is left, but only if the colony actually wants it.
+///
+/// The search widens a ring at a time and stops at the first ring that has
+/// something, so the common case meets a few dozen patches rather than the
+/// world. Own kind at any reach still beats the other kind close by, which is
+/// the rule the colony ran on before it had a horizon.
 pub fn gather_source(
-    patches: &Patches,
+    patches: &mut Patches,
     want: Cargo,
     from: IVec2,
     take_other: bool,
 ) -> Option<(IVec2, Cargo)> {
-    let nearest = |kind: Cargo| {
-        patches
-            .0
-            .iter()
-            .filter(|patch| patch.kind == kind && patch.amount > 0)
-            .min_by_key(|patch| (patch.pos - from).abs().max_element())
-            .map(|patch| (patch.pos, patch.kind))
-    };
-    match nearest(want) {
-        found @ Some(_) => found,
-        // Falling back on a store the colony already has more than enough of
-        // buys nothing and keeps a citizen out in the cold to do it.
-        None if take_other => nearest(want.other()),
-        None => None,
-    }
-}
-
-/// Strips a patch of what a hauler actually lifted, and hands back what was
-/// there to lift. What leaves the ground has to equal what reaches the store.
-pub fn take_from_patch(patches: &mut Patches, pos: IVec2, wanted: u32) -> u32 {
-    match patches.0.iter_mut().find(|patch| patch.pos == pos) {
-        Some(patch) => {
-            let taken = wanted.min(patch.amount);
-            patch.amount -= taken;
-            taken
+    let mut other: Option<(IVec2, Cargo)> = None;
+    let mut other_walk = i32::MAX;
+    for radius in SEARCH_RADII {
+        let mut found: Option<(IVec2, Cargo)> = None;
+        let mut walk_found = i32::MAX;
+        for patch in patches.reach(from, radius) {
+            if patch.amount == 0 {
+                continue;
+            }
+            let walk = (patch.pos - from).abs().max_element();
+            if patch.kind == want {
+                if walk < walk_found {
+                    walk_found = walk;
+                    found = Some((patch.pos, patch.kind));
+                }
+            } else if walk < other_walk {
+                other_walk = walk;
+                other = Some((patch.pos, patch.kind));
+            }
         }
-        None => 0,
+        if found.is_some() {
+            return found;
+        }
     }
+    // Falling back on a store the colony already has more than enough of buys
+    // nothing and keeps a citizen out in the cold to do it.
+    if take_other { other } else { None }
 }
 
 pub fn chunk_of(cell: IVec2) -> IVec2 {
@@ -1577,20 +1721,6 @@ pub fn chunk_patches(world: u64, chunk: IVec2) -> Vec<Patch> {
             amount: cap,
             cap,
         });
-    }
-    patches
-}
-
-/// The world the colony is founded in: the chunks around the hearth, generated
-/// rather than placed. There is no edge here -- this is only how much of the
-/// world has been asked for so far.
-pub fn founding_world(world: u64) -> Vec<Patch> {
-    let home = chunk_of(CENTER);
-    let mut patches = Vec::new();
-    for cx in -FOUNDING_REACH..=FOUNDING_REACH {
-        for cy in -FOUNDING_REACH..=FOUNDING_REACH {
-            patches.extend(chunk_patches(world, home + IVec2::new(cx, cy)));
-        }
     }
     patches
 }
@@ -1960,7 +2090,7 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
         ));
     }
 
-    commands.insert_resource(Patches(founding_world(WORLD_SEED)));
+    commands.insert_resource(Patches::new(WORLD_SEED));
 }
 
 pub fn advance_tick(mut tick: ResMut<Tick>) {
@@ -2069,10 +2199,27 @@ pub fn regrow_patches(tick: Res<Tick>, calendar: Res<Calendar>, mut patches: Res
     if !tick.0.is_multiple_of(ticks_per_day()) {
         return;
     }
-    let growing = is_growing_season(calendar.season);
-    for patch in &mut patches.0 {
-        patch.amount = regrowth_step(patch.amount, patch.cap, patch.kind, growing);
+    patches.regrow(is_growing_season(calendar.season));
+}
+
+/// The colony keeps only the world it is standing in. Everything else goes back
+/// to being a seed and a handful of remembered cuts.
+pub fn forget_far_world(
+    tick: Res<Tick>,
+    mut patches: ResMut<Patches>,
+    citizens: Query<&Pos, With<Citizen>>,
+) {
+    if !tick.0.is_multiple_of(ticks_per_season()) {
+        return;
     }
+    let mut homes = vec![CENTER];
+    homes.extend(citizens.iter().map(|pos| pos.0));
+    patches.forget_beyond(&homes, FORGET_BEYOND);
+    let span = 2 * (FORGET_BEYOND / CHUNK + 1) + 1;
+    debug_assert!(
+        patches.realised() <= homes.len() * (span * span) as usize,
+        "the colony is holding world nobody is standing near"
+    );
 }
 
 /// One reading a day of what the colony holds per head, kept a season deep.
@@ -2118,6 +2265,7 @@ pub fn count_buildings(mut built: ResMut<Built>, structures: Query<&Structure>) 
 pub fn assign_trades(
     tick: Res<Tick>,
     stores: Stores,
+    mut patches: ResMut<Patches>,
     postings: Res<Postings>,
     mayor: Res<Mayor>,
     mut citizens: Query<(Entity, &Pos, &mut Citizen)>,
@@ -2170,8 +2318,10 @@ pub fn assign_trades(
             .iter()
             .enumerate()
             .map(|(index, (_, at, experience))| {
-                let walk = gather_source(&stores.patches, short, *at, false)
-                    .map_or(R, |(cell, _)| (cell - *at).abs().max_element());
+                let walk = gather_source(&mut patches, short, *at, false)
+                    .map_or(SEARCH_RADII[0], |(cell, _)| {
+                        (cell - *at).abs().max_element()
+                    });
                 (index, assignment_score(walk, *experience, bias))
             })
             .collect();
@@ -2457,7 +2607,7 @@ pub fn citizen_ai(
         }
 
         let source = gather_source(
-            &colony.patches,
+            &mut colony.patches,
             citizen.hauling,
             pos.0,
             supply.wants(citizen.hauling.other()),
@@ -2474,7 +2624,7 @@ pub fn citizen_ai(
                 effective_stat(raised, FOCUS_UNTIL_MOOD_EXISTS, fit),
                 citizen.banked,
             );
-            let lifted = take_from_patch(&mut colony.patches, cell, wanted);
+            let lifted = colony.patches.take(cell, wanted);
             if lifted > 0 {
                 citizen.banked = banked;
                 citizen.load = lifted;
@@ -3060,7 +3210,7 @@ mod tests {
 
     #[test]
     fn a_hauler_switches_kind_when_its_own_patches_are_stripped() {
-        let mut patches = Patches(vec![
+        let mut patches = placed(vec![
             Patch {
                 pos: CENTER + IVec2::new(4, 0),
                 kind: Cargo::Wood,
@@ -3076,17 +3226,17 @@ mod tests {
         ]);
         let from = CENTER;
         assert_eq!(
-            gather_source(&patches, Cargo::Wood, from, true),
+            gather_source(&mut patches, Cargo::Wood, from, true),
             Some((CENTER + IVec2::new(0, 4), Cargo::Food)),
             "a stripped forest sends the hauler after game instead"
         );
-        patches.0[1].amount = 0;
-        assert_eq!(gather_source(&patches, Cargo::Wood, from, true), None);
+        patches.take(CENTER + IVec2::new(0, 4), 5);
+        assert_eq!(gather_source(&mut patches, Cargo::Wood, from, true), None);
     }
 
     #[test]
     fn a_hauler_prefers_its_own_kind_when_both_are_standing() {
-        let patches = Patches(vec![
+        let mut patches = placed(vec![
             Patch {
                 pos: CENTER + IVec2::new(9, 0),
                 kind: Cargo::Wood,
@@ -3101,7 +3251,7 @@ mod tests {
             },
         ]);
         assert_eq!(
-            gather_source(&patches, Cargo::Wood, CENTER, true),
+            gather_source(&mut patches, Cargo::Wood, CENTER, true),
             Some((CENTER + IVec2::new(9, 0), Cargo::Wood)),
             "the nearer patch of the wrong kind does not win"
         );
@@ -3110,26 +3260,27 @@ mod tests {
     #[test]
     fn taking_from_a_patch_draws_down_that_one_cell() {
         let pos = CENTER + IVec2::new(4, 0);
-        let mut patches = Patches(vec![Patch {
+        let mut patches = placed(vec![Patch {
             pos,
             kind: Cargo::Wood,
             amount: 2,
             cap: 2,
         }]);
-        assert_eq!(take_from_patch(&mut patches, pos, 1), 1);
-        assert_eq!(patches.0[0].amount, 1);
+        assert_eq!(patches.take(pos, 1), 1);
+        assert_eq!(standing(&mut patches, pos), 1);
         assert_eq!(
-            take_from_patch(&mut patches, pos, 5),
+            patches.take(pos, 5),
             1,
             "a patch hands over only what is standing on it"
         );
         assert_eq!(
-            patches.0[0].amount, 0,
+            standing(&mut patches, pos),
+            0,
             "a stripped patch must not underflow"
         );
-        assert_eq!(take_from_patch(&mut patches, pos, 3), 0);
+        assert_eq!(patches.take(pos, 3), 0);
         assert_eq!(
-            take_from_patch(&mut patches, CENTER, 1),
+            patches.take(CENTER, 1),
             0,
             "and there is nothing to lift where there is no patch"
         );
@@ -3456,7 +3607,7 @@ mod tests {
 
     #[test]
     fn plots_never_cover_the_generator_or_a_harvest_patch() {
-        let patches: Vec<IVec2> = founding_world(WORLD_SEED)
+        let patches: Vec<IVec2> = founding_world()
             .into_iter()
             .map(|patch| patch.pos)
             .collect();
@@ -3471,7 +3622,7 @@ mod tests {
 
     #[test]
     fn harvest_patches_are_distinct_and_carry_both_kinds() {
-        let patches = founding_world(WORLD_SEED);
+        let patches = founding_world();
         assert!(patches.iter().any(|p| p.kind == Cargo::Wood));
         assert!(patches.iter().any(|p| p.kind == Cargo::Food));
         for (i, a) in patches.iter().enumerate() {
@@ -4103,7 +4254,7 @@ mod tests {
 
     #[test]
     fn a_hauler_leaves_a_store_alone_that_the_colony_has_enough_of() {
-        let patches = Patches(vec![
+        let mut patches = placed(vec![
             Patch {
                 pos: CENTER + IVec2::new(4, 0),
                 kind: Cargo::Wood,
@@ -4117,9 +4268,9 @@ mod tests {
                 cap: 5,
             },
         ]);
-        assert!(gather_source(&patches, Cargo::Wood, CENTER, true).is_some());
+        assert!(gather_source(&mut patches, Cargo::Wood, CENTER, true).is_some());
         assert_eq!(
-            gather_source(&patches, Cargo::Wood, CENTER, false),
+            gather_source(&mut patches, Cargo::Wood, CENTER, false),
             None,
             "with the granary already over target, going out for more buys nothing"
         );
@@ -5354,6 +5505,184 @@ mod tests {
         assert!(
             density > rings_had * 0.5 && density < rings_had * 2.0,
             "the rings ran at {rings_had} patches a cell and the chunks run at {density}"
+        );
+    }
+
+    /// A world holding only these patches: every chunk a search could reach is
+    /// already there and empty, so nothing the seed would have drawn gets in
+    /// the way of a test that needs to name every patch a citizen can see.
+    fn placed(patches: Vec<Patch>) -> Patches {
+        let mut world = Patches {
+            seed: 0,
+            chunks: BTreeMap::new(),
+            worked: BTreeMap::new(),
+        };
+        let home = chunk_of(CENTER);
+        let span = SEARCH_RADII[SEARCH_RADII.len() - 1] / CHUNK + 2;
+        for x in -span..=span {
+            for y in -span..=span {
+                world
+                    .chunks
+                    .insert(key(home + IVec2::new(x, y)), Vec::new());
+            }
+        }
+        for patch in patches {
+            world
+                .chunks
+                .entry(key(chunk_of(patch.pos)))
+                .or_default()
+                .push(patch);
+        }
+        world
+    }
+
+    /// Everything the colony is founded on, however the chunks are held.
+    fn founding_world() -> Vec<Patch> {
+        Patches::new(WORLD_SEED)
+            .chunks
+            .values()
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    fn standing(world: &mut Patches, cell: IVec2) -> u32 {
+        world.reach(cell, 0).next().map_or(0, |patch| patch.amount)
+    }
+
+    #[test]
+    fn a_query_only_ever_looks_at_what_is_near() {
+        let mut world = Patches::new(WORLD_SEED);
+        let radius = 24;
+        for patch in world.reach(CENTER, radius) {
+            let out = (patch.pos - CENTER).abs().max_element();
+            assert!(out <= radius, "a bounded query looked {out} cells away");
+        }
+        assert!(
+            world.reach(CENTER, radius).count() > 0,
+            "and it found something inside the reach"
+        );
+    }
+
+    #[test]
+    fn a_query_never_touches_more_chunks_than_its_reach_covers() {
+        let mut world = Patches::new(WORLD_SEED);
+        let radius = 24;
+        let held = world.realised();
+        // Somewhere the colony has never been, so what the query draws is all
+        // of what it draws.
+        let _ = world.reach(CENTER + IVec2::splat(1000), radius).count();
+        let drawn = world.realised() - held;
+        let could_reach = ((2 * radius / CHUNK) + 2).pow(2) as usize;
+        assert!(
+            drawn <= could_reach,
+            "{drawn} chunks drawn for a reach that covers at most {could_reach}"
+        );
+    }
+
+    #[test]
+    fn a_colony_cannot_walk_away_from_a_stripped_treeline_and_come_back_to_a_full_one() {
+        let mut world = Patches::new(WORLD_SEED);
+        let cell = world
+            .reach(CENTER, 64)
+            .map(|patch| patch.pos)
+            .next()
+            .expect("the near world holds something");
+        let before = standing(&mut world, cell);
+        assert!(before > 0);
+        assert_eq!(world.take(cell, before), before, "strip it bare");
+        assert_eq!(standing(&mut world, cell), 0);
+
+        world.forget_beyond(&[], 0);
+        assert_eq!(
+            standing(&mut world, cell),
+            0,
+            "the colony took it, so it stays taken however the chunk is asked for again"
+        );
+    }
+
+    #[test]
+    fn a_cell_nobody_touched_comes_back_from_the_seed() {
+        let mut world = Patches::new(WORLD_SEED);
+        let untouched: Vec<(IVec2, u32)> = world
+            .reach(CENTER, 64)
+            .map(|patch| (patch.pos, patch.amount))
+            .collect();
+        world.forget_beyond(&[], 0);
+        for (cell, was) in untouched {
+            assert_eq!(
+                standing(&mut world, cell),
+                was,
+                "an untouched cell must regenerate"
+            );
+        }
+    }
+
+    #[test]
+    fn a_patch_grows_back_towards_the_cap_it_was_generated_with() {
+        let mut world = Patches::new(WORLD_SEED);
+        let cell = world
+            .reach(CENTER, 64)
+            .map(|p| p.pos)
+            .next()
+            .expect("a patch");
+        let cap = world.reach(cell, 0).next().expect("a patch").cap;
+        world.take(cell, cap);
+        assert_eq!(standing(&mut world, cell), 0);
+        for _ in 0..1000 {
+            world.regrow(true);
+        }
+        assert_eq!(
+            standing(&mut world, cell),
+            cap,
+            "and stops at the cap, not past it"
+        );
+    }
+
+    #[test]
+    fn nothing_grows_back_in_a_chunk_nobody_has_been_to() {
+        let mut world = Patches::new(WORLD_SEED);
+        let _ = world.reach(CENTER, 24).count();
+        let realised = world.realised();
+        world.regrow(true);
+        assert_eq!(
+            world.realised(),
+            realised,
+            "regrowth must not be what realises the world"
+        );
+    }
+
+    #[test]
+    fn the_search_widens_when_the_near_ground_is_bare() {
+        let mut world = Patches::new(WORLD_SEED);
+        let bare: Vec<IVec2> = world
+            .reach(CENTER, SEARCH_RADII[0])
+            .map(|patch| patch.pos)
+            .collect();
+        for cell in &bare {
+            let all = standing(&mut world, *cell);
+            world.take(*cell, all);
+        }
+        let found = gather_source(&mut world, Cargo::Wood, CENTER, true)
+            .expect("a bare near ring must send a citizen further, not idle them");
+        let out = (found.0 - CENTER).abs().max_element();
+        assert!(out > SEARCH_RADII[0], "it found something at {out}");
+        assert!(
+            out <= SEARCH_RADII[SEARCH_RADII.len() - 1],
+            "but not past where anybody would walk"
+        );
+    }
+
+    #[test]
+    fn the_rings_a_search_widens_through_are_bounded_and_in_order() {
+        let mut previous = 0;
+        for radius in SEARCH_RADII {
+            assert!(radius > previous, "the rings must widen");
+            previous = radius;
+        }
+        assert!(
+            SEARCH_RADII[SEARCH_RADII.len() - 1] == RICHNESS_BEST,
+            "the widest ring is where the ground stops getting better for the walk"
         );
     }
 }

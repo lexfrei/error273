@@ -1,9 +1,37 @@
+use bevy::ecs::system::SystemParam;
+use bevy::prelude::*;
+
 use crate::sim::{
-    ADULT_AGE, BUILDING_COUNT, BUILDINGS, Building, Calendar, FRAILTY_ONSET, Regard, STAT_COUNT,
-    STATS, couples, is_adult,
+    ADULT_AGE, BUILDING_COUNT, BUILDINGS, Ballot, Building, CENTER, Calendar, Cargo, Construction,
+    FRAILTY_ONSET, Outside, Patches, Regard, SEARCH_RADII, STAT_COUNT, STATS, Stores, couples,
+    is_adult,
 };
 
 pub const STATUS_LINES: usize = 5;
+
+/// Everything a face reads to fill a `Status`, in one borrow. The two of them
+/// ask the world the same questions, so they ask through the same param.
+#[derive(SystemParam)]
+pub struct Readings<'w> {
+    pub outside: Outside<'w>,
+    pub stores: Stores<'w>,
+    pub patches: Res<'w, Patches>,
+    pub construction: Res<'w, Construction>,
+    pub ballot: Res<'w, Ballot>,
+}
+
+impl Readings<'_> {
+    /// What is standing inside the ring a citizen looks in first. The world has
+    /// no edge, so a total over all of it would only report how far the colony
+    /// has wandered.
+    pub fn standing(&self, kind: Cargo) -> u32 {
+        self.patches
+            .seen(CENTER, SEARCH_RADII[0])
+            .filter(|patch| patch.kind == kind)
+            .map(|patch| patch.amount)
+            .sum()
+    }
+}
 
 /// Everything the status lines report. Both faces of the game fill one of these
 /// before formatting, so a reading that exists in one and not the other is a

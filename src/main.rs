@@ -52,6 +52,7 @@ fn main() {
                 sim::count_buildings,
                 sim::advance_weather,
                 sim::regrow_patches,
+                sim::forget_far_world,
                 sim::record_trend,
                 sim::assign_trades,
                 sim::construction,

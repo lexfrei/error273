@@ -12,11 +12,10 @@ use bevy::sprite::Anchor;
 use bevy::window::WindowResolution;
 
 use crate::sim::{
-    Air, BUILDINGS, Ballot, Building, CENTER, Cargo, Citizen, Construction, GENERATOR_HEAT,
-    NeedKind, Outside, Pos, R, Regard, STAT_COUNT, STATS, Stores, Structure, estimate, is_known,
-    median, regard_of,
+    Air, BUILDINGS, Building, CENTER, Cargo, Citizen, Construction, GENERATOR_HEAT, NeedKind,
+    Patches, Pos, R, Regard, STAT_COUNT, STATS, Structure, estimate, is_known, median, regard_of,
 };
-use crate::status::{CitizenCard, STATUS_LINES, Status, status_lines};
+use crate::status::{CitizenCard, Readings, STATUS_LINES, Status, status_lines};
 
 /// Compiled in rather than loaded from `assets/`, so the binary draws the same
 /// map wherever it is run from.
@@ -158,7 +157,7 @@ fn spawn_board(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
 
 fn paint_map(
     air: Res<Air>,
-    stores: Stores,
+    patches: Res<Patches>,
     construction: Res<Construction>,
     structures: Query<(&Pos, &Structure)>,
     citizens: Query<(&Pos, &Citizen)>,
@@ -173,19 +172,27 @@ fn paint_map(
             }
         }
     }
-    for patch in &stores.patches.0 {
-        grid[patch.pos.y as usize][patch.pos.x as usize] = patch_mark(patch.kind, patch.amount);
+    // The world reaches past the board now, and citizens walk out with it, so
+    // everything painted is clipped to what the board can hold. The board
+    // becomes a viewport that follows the colony in a later pass.
+    let mark_at = |grid: &mut Vec<Vec<Mark>>, at: IVec2, mark: Mark| {
+        if (0..GRID as i32).contains(&at.x) && (0..GRID as i32).contains(&at.y) {
+            grid[at.y as usize][at.x as usize] = mark;
+        }
+    };
+    for patch in patches.seen(CENTER, R) {
+        mark_at(&mut grid, patch.pos, patch_mark(patch.kind, patch.amount));
     }
     for (pos, structure) in &structures {
-        grid[pos.0.y as usize][pos.0.x as usize] = structure_mark(structure.0);
+        mark_at(&mut grid, pos.0, structure_mark(structure.0));
     }
     if let Some(site) = &construction.site {
-        grid[site.pos.y as usize][site.pos.x as usize] = SITE;
+        mark_at(&mut grid, site.pos, SITE);
     }
     for (pos, citizen) in &citizens {
-        grid[pos.0.y as usize][pos.0.x as usize] = citizen_mark(citizen, pos.0);
+        mark_at(&mut grid, pos.0, citizen_mark(citizen, pos.0));
     }
-    grid[CENTER.y as usize][CENTER.x as usize] = GENERATOR;
+    mark_at(&mut grid, CENTER, GENERATOR);
 
     let air = *air;
     for (cell, mut sprite) in &mut tiles {
@@ -208,23 +215,11 @@ fn paint_map(
 }
 
 fn paint_status(
-    outside: Outside,
-    stores: Stores,
-    construction: Res<Construction>,
-    ballot: Res<Ballot>,
+    readings: Readings,
     structures: Query<&Structure>,
     citizens: Query<&Citizen>,
     mut lines: Query<(&StatusLine, &mut Text2d)>,
 ) {
-    let standing = |kind: Cargo| -> u32 {
-        stores
-            .patches
-            .0
-            .iter()
-            .filter(|patch| patch.kind == kind)
-            .map(|patch| patch.amount)
-            .sum()
-    };
     let mut buildings = [0usize; BUILDINGS.len()];
     for structure in &structures {
         buildings[structure.0 as usize] += 1;
@@ -260,20 +255,21 @@ fn paint_status(
             }
         });
     let status = Status {
-        tick: outside.tick.0,
-        calendar: *outside.calendar,
-        ambient: outside.air.ambient,
+        tick: readings.outside.tick.0,
+        calendar: *readings.outside.calendar,
+        ambient: readings.outside.air.ambient,
         alive: ages.len(),
-        fuel: stores.generator.fuel,
-        food: stores.granary.food,
-        wood: standing(Cargo::Wood),
-        game: standing(Cargo::Food),
+        fuel: readings.stores.generator.fuel,
+        food: readings.stores.granary.food,
+        wood: readings.standing(Cargo::Wood),
+        game: readings.standing(Cargo::Food),
         buildings,
-        project: construction
+        project: readings
+            .construction
             .site
             .as_ref()
             .map(|site| (site.building, site.delivered)),
-        tally: ballot.tally,
+        tally: readings.ballot.tally,
         ages,
         stats,
         card,

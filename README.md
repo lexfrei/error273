@@ -67,7 +67,7 @@ The map below is the window's glyph set; the four lines under it are exactly wha
 | `z` | a citizen asleep at home |
 | `.` | open ground |
 
-Five lines sit under the map. The first is the tick counter, the date it works out to, and the air outside the fire's reach. The second is the living population and the four quantities that decide the run: fuel in the generator, food in the granary, wood still standing, game still standing. The third counts what has been built, names the project in progress with how much timber it has swallowed so far, and gives the last ballot as votes for house, hut and boiler in that order. The fourth is the age pyramid -- children, grown citizens, the frail -- how many couples the colony has, and the middle of the colony for each of the three stats. That last is an aggregate and not a reveal: what any one citizen is stays hidden.
+Five lines sit under the map. The first is the tick counter, the date it works out to, and the air outside the fire's reach. The second is the living population and the four quantities that decide the run: fuel in the generator, food in the granary, and the wood and game still standing within the ring a citizen looks in first. A total over the whole world would only report how far the colony has wandered, so those two columns are what it can reach rather than what exists. The third counts what has been built, names the project in progress with how much timber it has swallowed so far, and gives the last ballot as votes for house, hut and boiler in that order. The fourth is the age pyramid -- children, grown citizens, the frail -- how many couples the colony has, and the middle of the colony for each of the three stats. That last is an aggregate and not a reveal: what any one citizen is stays hidden.
 
 ## Running it
 
@@ -118,7 +118,7 @@ The feature is off by default. Without it the build stays headless, on the depen
 
 ## What the simulation does
 
-The map is a disc of radius 18. The generator sits at the centre, the treelines and hunting grounds on the rim, and everything the colony builds goes up on rings between them.
+The generator sits at the hearth and everything the colony builds goes up on rings around it. The ground beyond carries the treelines and hunting grounds, and it does not stop: the window shows the cells nearest the hearth, and citizens walk off its edges.
 
 One tick is a game hour, twenty-four hours a day, thirty days a season, four seasons a year. Every rate below is written in those units in the source and converted through the clock, so the real-time tempo and the length of a day are separate knobs.
 
@@ -146,7 +146,9 @@ Sleeping under a roof cuts the bleed of body heat by 30%. It is shelter, not a s
 
 The world has no edge. It is generated in squares of sixty-four cells, each one worked out from the world seed and its own coordinates alone, so a square can be asked for in any order and the same world comes back. Treelines and hunting grounds are scattered through it at about the density the old founding rings ran at, so the ground around the hearth holds what it always did. They are not a fixed store either: they grow back towards their own caps in every season but winter, which is what makes the year rather than the map decide how long a colony lasts.
 
-What is further out is worth more. A patch's cap is flat out to the old rim and rises past it, until about a hundred and eighty cells out where it stops, so a longer walk buys a bigger load -- and the walk itself costs warmth, which is the other half of that bargain.
+What is further out is worth more. A patch's cap is flat out to the old rim and rises past it, until about a hundred and eighty cells out where it stops. A trip out there does not bring home more at once, since what a citizen can carry is set by the citizen; it means the ground gives up more before it is bare, and grows back to more.
+
+A citizen looks for work in a ring twenty-four cells wide and widens it only when there is nothing standing inside -- twice, then out to where richness stops rising, which is as far as anybody walks. Two things fall out of that. The search meets a few dozen patches instead of a world, which is what keeps the cost of a tick from following the size of the map. And the colony only draws the world it looks at: a square is worked out the first time somebody looks inside it and dropped again once nobody is near, because the seed can always redraw it. What the colony took is the one thing the seed does not know, so every cut is kept apart from the squares and put back on top -- a stripped treeline is still stripped when the colony walks away and comes back.
 
 A citizen picks which of the two to fetch by comparing each store against what the colony wants to hold per head, and keeps to that choice for the whole trip. They only change their mind when the other store has fallen a clear margin behind, because a round trip takes thirty-odd hours and a workforce that turns around every time a number crosses its target arrives too late in both directions. That margin is counted in hauls rather than units, so it widens as huts make each trip of game worth more: the slack a store gets is always about the same number of trips. The comparison is also made against what each store will hold once everyone already fetching that kind gets home, not against what is in it now, so a shortage pulls over as many haulers as it needs and no more.
 

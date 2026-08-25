@@ -5,28 +5,12 @@
 use bevy::prelude::*;
 
 use crate::sim::{
-    BUILDINGS, Ballot, Cargo, Citizen, Construction, Outside, Regard, STAT_COUNT, STATS, Stores,
-    Structure, estimate, is_known, median, regard_of,
+    BUILDINGS, Cargo, Citizen, Regard, STAT_COUNT, STATS, Structure, estimate, is_known, median,
+    regard_of,
 };
-use crate::status::{CitizenCard, Status, status_lines};
+use crate::status::{CitizenCard, Readings, Status, status_lines};
 
-pub fn print_status(
-    outside: Outside,
-    stores: Stores,
-    construction: Res<Construction>,
-    ballot: Res<Ballot>,
-    structures: Query<&Structure>,
-    citizens: Query<&Citizen>,
-) {
-    let standing = |kind: Cargo| -> u32 {
-        stores
-            .patches
-            .0
-            .iter()
-            .filter(|patch| patch.kind == kind)
-            .map(|patch| patch.amount)
-            .sum()
-    };
+pub fn print_status(readings: Readings, structures: Query<&Structure>, citizens: Query<&Citizen>) {
     let mut buildings = [0usize; BUILDINGS.len()];
     for structure in &structures {
         buildings[structure.0 as usize] += 1;
@@ -62,20 +46,21 @@ pub fn print_status(
             }
         });
     let status = Status {
-        tick: outside.tick.0,
-        calendar: *outside.calendar,
-        ambient: outside.air.ambient,
+        tick: readings.outside.tick.0,
+        calendar: *readings.outside.calendar,
+        ambient: readings.outside.air.ambient,
         alive: ages.len(),
-        fuel: stores.generator.fuel,
-        food: stores.granary.food,
-        wood: standing(Cargo::Wood),
-        game: standing(Cargo::Food),
+        fuel: readings.stores.generator.fuel,
+        food: readings.stores.granary.food,
+        wood: readings.standing(Cargo::Wood),
+        game: readings.standing(Cargo::Food),
         buildings,
-        project: construction
+        project: readings
+            .construction
             .site
             .as_ref()
             .map(|site| (site.building, site.delivered)),
-        tally: ballot.tally,
+        tally: readings.ballot.tally,
         ages,
         stats,
         card,
