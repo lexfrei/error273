@@ -14,9 +14,9 @@ use crate::status::{CitizenCard, Readings, Status, status_lines};
 /// headless build's business and not the simulation's -- see `world_is_bounded`.
 pub fn hold_the_world_bound(patches: Res<Patches>) {
     assert!(
-        world_is_bounded(patches.realised()),
-        "the colony is holding {} chunks of world, past the ceiling",
-        patches.realised()
+        world_is_bounded(patches.held_cells()),
+        "the colony is holding {} cells of world, past the ceiling",
+        patches.held_cells()
     );
 }
 

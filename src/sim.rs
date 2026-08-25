@@ -210,9 +210,14 @@ pub const WALK_UNFOUND: i32 = SEARCH_RADII[SEARCH_RADII.len() - 1];
 /// The seed the world is generated from. One number, fixed, so a run replays.
 pub const WORLD_SEED: u64 = 0x2026;
 /// The most of the world the colony may be holding at once, in cells. It is a
-/// ceiling on memory, not on where anybody can walk: a colony that keeps moving
-/// draws chunks as it goes and drops the ones behind it, so what it holds has
-/// to follow where it is standing rather than how long it has been running.
+/// ceiling on memory, not on where anybody can walk.
+///
+/// The two halves it covers grow for different reasons, which is why it has to
+/// cover both. Realised chunks follow where the colony is standing: it draws
+/// them as it goes and drops the ones behind it. Remembered cuts cannot be
+/// dropped -- letting one go is letting a stripped treeline come back full --
+/// so they follow how much ground the colony has ever worked, and that is the
+/// half a long run would break the ceiling with.
 #[cfg(not(feature = "window"))]
 pub const WORLD_CELLS_HELD: usize = 1 << 20;
 
@@ -221,8 +226,8 @@ pub const WORLD_CELLS_HELD: usize = 1 << 20;
 /// simulation that policed its own memory would be able to hide a leak by
 /// quietly forgetting more.
 #[cfg(not(feature = "window"))]
-pub fn world_is_bounded(chunks_held: usize) -> bool {
-    chunks_held * (CHUNK * CHUNK) as usize <= WORLD_CELLS_HELD
+pub fn world_is_bounded(cells_held: usize) -> bool {
+    cells_held <= WORLD_CELLS_HELD
 }
 
 // Stats are raised, not rolled. A childhood is banked hour by hour and settled
@@ -1071,12 +1076,12 @@ impl Patches {
         world
     }
 
-    /// How much of the world is being held. The colony's memory, not its size,
-    /// and a reading rather than a rule -- so it exists where the instrument
-    /// that reads it does, and nowhere else.
+    /// Everything the colony is holding, counted in cells so that the two
+    /// halves can be added at all. A realised chunk is the whole square; a
+    /// remembered cut is the one cell it was made in.
     #[cfg(not(feature = "window"))]
-    pub fn realised(&self) -> usize {
-        self.chunks.len()
+    pub fn held_cells(&self) -> usize {
+        self.chunks.len() * (CHUNK * CHUNK) as usize + self.worked.len()
     }
 
     fn realise(&mut self, chunk: IVec2) {
@@ -5600,16 +5605,15 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "window"))]
     #[test]
     fn a_query_never_touches_more_chunks_than_its_reach_covers() {
         let mut world = Patches::new(WORLD_SEED);
         let radius = 24;
-        let held = world.realised();
+        let held = world.chunks.len();
         // Somewhere the colony has never been, so what the query draws is all
         // of what it draws.
         let _ = world.reach(CENTER + IVec2::splat(1000), radius).count();
-        let drawn = world.realised() - held;
+        let drawn = world.chunks.len() - held;
         let could_reach = ((2 * radius / CHUNK) + 2).pow(2) as usize;
         assert!(
             drawn <= could_reach,
@@ -5676,15 +5680,14 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "window"))]
     #[test]
     fn nothing_grows_back_in_a_chunk_nobody_has_been_to() {
         let mut world = Patches::new(WORLD_SEED);
         let _ = world.reach(CENTER, 24).count();
-        let realised = world.realised();
+        let realised = world.chunks.len();
         world.regrow(true);
         assert_eq!(
-            world.realised(),
+            world.chunks.len(),
             realised,
             "regrowth must not be what realises the world"
         );
@@ -5726,16 +5729,30 @@ mod tests {
 
     #[cfg(not(feature = "window"))]
     #[test]
-    fn the_bound_is_a_number_of_cells_and_not_a_number_of_chunks() {
-        let chunks = WORLD_CELLS_HELD / (CHUNK * CHUNK) as usize;
+    fn the_bound_counts_the_cuts_the_colony_remembers_and_not_only_its_chunks() {
+        let mut world = Patches::new(WORLD_SEED);
+        let chunks = world.chunks.len() * (CHUNK * CHUNK) as usize;
+        assert_eq!(
+            world.held_cells(),
+            chunks,
+            "nothing cut, nothing remembered"
+        );
+        let cell = world
+            .reach(CENTER, 64)
+            .map(|patch| patch.pos)
+            .next()
+            .expect("the near world holds something");
+        world.take(cell, 1);
+        assert_eq!(
+            world.held_cells(),
+            chunks + 1,
+            "a remembered cut is held whether or not its chunk still is"
+        );
         assert!(
-            world_is_bounded(chunks),
+            world_is_bounded(WORLD_CELLS_HELD),
             "the ceiling itself must be allowed"
         );
-        assert!(
-            !world_is_bounded(chunks + 1),
-            "and one chunk past it must not be"
-        );
+        assert!(!world_is_bounded(WORLD_CELLS_HELD + 1), "one past it not");
     }
 
     #[cfg(not(feature = "window"))]
@@ -5743,17 +5760,21 @@ mod tests {
     fn the_world_a_wandering_colony_holds_stays_bounded() {
         let mut world = Patches::new(WORLD_SEED);
         let furthest = SEARCH_RADII[SEARCH_RADII.len() - 1];
-        // A colony that keeps walking, drawing the world as it goes and never
-        // coming back. What it holds must follow where it stands, not how far
-        // it has been.
+        // A colony that keeps walking, cutting as it goes and never coming
+        // back. Both halves of what it holds are under the ceiling: the chunks,
+        // which it may drop, and the cuts, which it may not.
         for step in 1..60 {
             let out = CENTER + IVec2::splat(step * furthest);
-            let _ = world.reach(out, furthest).count();
+            let cut: Vec<IVec2> = world.reach(out, furthest).map(|patch| patch.pos).collect();
+            assert!(!cut.is_empty(), "there has to be ground out here to cut");
+            for cell in cut {
+                world.take(cell, 1);
+            }
             world.forget_beyond(&[out], FORGET_BEYOND);
             assert!(
-                world_is_bounded(world.realised()),
-                "{} chunks held after {step} moves",
-                world.realised()
+                world_is_bounded(world.held_cells()),
+                "{} cells held after {step} moves",
+                world.held_cells()
             );
         }
     }
