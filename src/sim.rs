@@ -1818,11 +1818,19 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
         // Every seed in the colony comes from here, founders included, or a
         // newcomer would eventually be handed a founder's lifespan and rolls.
         let seed = lineage.next();
+        // The upbringing is the one place a citizen's stats come from, so their
+        // span is read off it rather than derived alongside it.
+        let upbringing = Upbringing::grown(seed);
+        let lifespan = lifespan_of(
+            seed,
+            upbringing.stats().of(Stat::Hardiness),
+            upbringing.prosperity(),
+        );
         commands.spawn((
             Pos(ring_pos(START_RING, angle)),
             Citizen {
                 needs: Needs::founder(i, CITIZENS),
-                upbringing: Upbringing::grown(seed),
+                upbringing,
                 acclimated: 0.0,
                 watched: 0.0,
                 banked: 0.0,
@@ -1830,11 +1838,7 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
                 trade: founding_trade(i),
                 experience: [0.0; TRADE_COUNT],
                 age: founder_age(i, CITIZENS),
-                lifespan: lifespan_of(
-                    seed,
-                    Stats::migrant(seed).of(Stat::Hardiness),
-                    FORMATION_NEUTRAL,
-                ),
+                lifespan,
                 seed,
                 home,
                 carrying: None,
@@ -2194,11 +2198,18 @@ pub fn colony_growth(
         };
         homes.push(home);
         let seed = lineage.next();
+        let upbringing = Upbringing::born(seed);
+        // A guess until the childhood that will settle it has happened.
+        let lifespan = lifespan_of(
+            seed,
+            upbringing.stats().of(Stat::Hardiness),
+            upbringing.prosperity(),
+        );
         commands.spawn((
             Pos(CENTER),
             Citizen {
                 needs: Needs::newcomer(),
-                upbringing: Upbringing::born(seed),
+                upbringing,
                 acclimated: 0.0,
                 watched: 0.0,
                 banked: 0.0,
@@ -2207,11 +2218,7 @@ pub fn colony_growth(
                 trade: Trade::Laborer,
                 experience: [0.0; TRADE_COUNT],
                 age: 0.0,
-                lifespan: lifespan_of(
-                    seed,
-                    Stats::migrant(seed).of(Stat::Hardiness),
-                    FORMATION_NEUTRAL,
-                ),
+                lifespan,
                 seed,
                 home,
                 carrying: None,
