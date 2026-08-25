@@ -199,6 +199,40 @@ pub const RESIDUAL_SHARE_LEAN: f32 = 0.2;
 pub const RESIDUAL_SHARE_FAT: f32 = 0.8;
 /// How far a childhood can move a span either way.
 pub const LIFESPAN_RAISED_SWING: f32 = 0.2;
+
+// Trades. What a citizen is worth at work is what the colony raised in them,
+// what they have practised, and -- once the mood layer exists -- how well they
+// are holding up.
+pub const TRADE_COUNT: usize = 3;
+pub const FIT_FLOOR: f32 = 0.5;
+pub const FIT_STAT: f32 = 0.6;
+pub const FIT_PRACTICE: f32 = 0.5;
+pub const FIT_CEILING: f32 = 1.8;
+/// Hard-wired until the mood layer fills it. The shape is here so that layer
+/// has somewhere to land without touching anything that reads a stat.
+pub const FOCUS_UNTIL_MOOD_EXISTS: f32 = 1.0;
+pub const HAUL_LOAD_SWING: f32 = 1.0;
+// Distance is the Chebyshev norm, which is the true travel time under
+// one-cell-per-tick king moves, and is deliberately the wrong distance for
+// anything but that.
+pub const WEIGHT_DISTANCE: f32 = 0.05;
+pub const WEIGHT_EXPERIENCE: f32 = 1.0;
+pub const WEIGHT_BIAS: f32 = 0.5;
+/// Filled from the best few rather than the best, which buys variety with no
+/// randomness in the model.
+pub const ASSIGNMENT_SHORTLIST: usize = 3;
+pub const EXPERIENCE_GAIN: f32 = per_season(1.0);
+pub const EXPERIENCE_RUST: f32 = per_season(0.2);
+// A trade nobody could keep would not be a trade, checked where it cannot be
+// skipped.
+const _: () = assert!(EXPERIENCE_GAIN > EXPERIENCE_RUST);
+/// A fifth to a quarter of the workforce held back for work no trade covers.
+pub const LABORER_SHARE: f32 = 0.22;
+/// What a child of the house starts with of the head's practice in it.
+pub const INHERITED_SHARE: f32 = 0.4;
+/// One founder in this many takes to hunting. The fire is most of what a colony
+/// spends, so most of the founding party goes to the treelines.
+pub const HUNTERS_ONE_IN: usize = 4;
 // How much more than it spends a colony must be able to fetch before it takes
 // on another mouth. The rate it is judged on is a season's average, and the
 // season that binds is the one that puts nothing back, so this margin is the
@@ -263,6 +297,110 @@ pub const HAUL_SWITCH_MAX: f32 = 0.35;
 // Every block of citizens the generator has to warm costs another log per cycle,
 // so growth is paid for twice: once in timber, then forever in fuel.
 pub const POP_PER_EXTRA_BURN: usize = 20;
+
+/// What a citizen does with their days. The labourer pool is a trade like any
+/// other and is what makes the others fillable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trade {
+    Woodcutter,
+    Hunter,
+    Laborer,
+}
+
+pub const TRADES: [Trade; TRADE_COUNT] = [Trade::Woodcutter, Trade::Hunter, Trade::Laborer];
+
+/// The stat a trade leans on. A labourer is judged on the same thing a
+/// woodcutter is, because that is most of what the colony asks of them.
+pub fn trade_stat(trade: Trade) -> Stat {
+    match trade {
+        Trade::Woodcutter | Trade::Laborer => Stat::Strength,
+        Trade::Hunter => Stat::Wits,
+    }
+}
+
+/// What a trade fetches, or nothing for a labourer, who goes wherever the
+/// colony is shorter.
+pub fn trade_cargo(trade: Trade) -> Option<Cargo> {
+    match trade {
+        Trade::Woodcutter => Some(Cargo::Wood),
+        Trade::Hunter => Some(Cargo::Food),
+        Trade::Laborer => None,
+    }
+}
+
+pub fn trade_for(cargo: Cargo) -> Trade {
+    match cargo {
+        Cargo::Wood => Trade::Woodcutter,
+        Cargo::Food => Trade::Hunter,
+    }
+}
+
+/// How well a citizen fits the work: what the colony raised in them and what
+/// they have actually done, both saturating so neither runs away.
+pub fn trade_fit(stat: f32, experience: f32) -> f32 {
+    (FIT_FLOOR + stat * FIT_STAT + experience.clamp(0.0, 1.0) * FIT_PRACTICE).min(FIT_CEILING)
+}
+
+/// What a citizen brings to the work. `focus_mult` is one until the mood layer
+/// exists to move it.
+pub fn effective_stat(base: f32, focus_mult: f32, trade_fit_mult: f32) -> f32 {
+    base * focus_mult * trade_fit_mult
+}
+
+/// What one trip brings home. This is the only place anything the colony raised
+/// turns into capacity rather than merely into survival.
+pub fn haul_load(effective: f32) -> u32 {
+    1 + (effective.max(0.0) * HAUL_LOAD_SWING) as u32
+}
+
+/// How good a candidate a citizen is for a vacancy.
+pub fn assignment_score(distance: i32, experience: f32, bias: f32) -> f32 {
+    WEIGHT_EXPERIENCE * experience + WEIGHT_BIAS * bias - WEIGHT_DISTANCE * distance as f32
+}
+
+/// The vacancy goes to one of the best few rather than the best.
+pub fn pick_from_top(scored: &[(usize, f32)], roll: f32) -> Option<usize> {
+    if scored.is_empty() {
+        return None;
+    }
+    let mut ranked = scored.to_vec();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let shortlist = ranked.len().min(ASSIGNMENT_SHORTLIST);
+    let pick = ((roll * shortlist as f32) as usize).min(shortlist - 1);
+    Some(ranked[pick].0)
+}
+
+/// One hour of a trade being practised, or of another one going to rust.
+pub fn experience_step(experience: f32, working: bool) -> f32 {
+    let moved = if working {
+        experience + EXPERIENCE_GAIN
+    } else {
+        experience - EXPERIENCE_RUST
+    };
+    moved.clamp(0.0, 1.0)
+}
+
+/// How many hands the colony keeps out of the trades so somebody can always
+/// take work no trade covers.
+pub fn laborers_wanted(hands: usize) -> usize {
+    (hands as f32 * LABORER_SHARE).round() as usize
+}
+
+/// What a child of the house starts with. The household is the vertical channel
+/// and this is the whole of what it hands down.
+pub fn inherited_experience(head: f32) -> f32 {
+    head * INHERITED_SHARE
+}
+
+/// The oldest grown citizen of a house, whose trade a child of it takes. The
+/// household is the vertical channel and this is the whole of what runs it.
+pub fn household_head(adults: &[(IVec2, Trade, f32, f32)], home: IVec2) -> Option<(Trade, f32)> {
+    adults
+        .iter()
+        .filter(|(house, ..)| *house == home)
+        .max_by(|a, b| a.3.total_cmp(&b.3))
+        .map(|(_, trade, experience, _)| (*trade, *experience))
+}
 
 /// What a colony raises in a citizen. Hidden: the card prints a word, never a
 /// number, and only once the colony has watched enough work to have an opinion.
@@ -802,6 +940,9 @@ impl Lineage {
 #[derive(Resource, Default)]
 pub struct Mayor {
     pub bias: [f32; BUILDING_COUNT],
+    /// The same thumb, on the other scale: which trades the office leans toward
+    /// when a vacancy is filled. Inert data, like the rest of the office.
+    pub trade_bias: [f32; TRADE_COUNT],
 }
 
 /// The last ballot the colony held, kept so it can be shown.
@@ -832,6 +973,9 @@ pub struct Citizen {
     pub upbringing: Upbringing,
     /// How far their body has learned the cold, which the cold takes back.
     pub acclimated: f32,
+    /// What they do with their days, and what they have practised at.
+    pub trade: Trade,
+    pub experience: [f32; TRADE_COUNT],
     /// Years lived, on the same clock the calendar prints.
     pub age: f32,
     /// The span this one would reach if nothing got them first.
@@ -1517,6 +1661,21 @@ pub fn has_hands_to_spare(children: usize, population: usize) -> bool {
     population > 0 && (children as f32 / population as f32) <= MAX_DEPENDENT_SHARE
 }
 
+/// How the founding party divides itself up. The labourer pool is set aside
+/// first, because a colony with nobody spare has no way to fill a vacancy; the
+/// rest go mostly to the treelines, because the fire is most of what a colony
+/// spends and nobody quits a trade once they have it.
+pub fn founding_trade(index: usize) -> Trade {
+    let spare = laborers_wanted(CITIZENS);
+    if index < spare {
+        Trade::Laborer
+    } else if (index - spare).is_multiple_of(HUNTERS_ONE_IN) {
+        Trade::Hunter
+    } else {
+        Trade::Woodcutter
+    }
+}
+
 pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
     let houses = CITIZENS.div_ceil(HOUSE_CAPACITY);
     let sites: Vec<IVec2> = (0..houses).filter_map(plot_site).collect();
@@ -1540,6 +1699,8 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
                 needs: Needs::founder(i, CITIZENS),
                 upbringing: Upbringing::grown(seed),
                 acclimated: 0.0,
+                trade: founding_trade(i),
+                experience: [0.0; TRADE_COUNT],
                 age: founder_age(i, CITIZENS),
                 lifespan: lifespan_of(
                     seed,
@@ -1573,6 +1734,18 @@ pub fn aging(mut citizens: Query<&mut Citizen>) {
     );
     let warmth = shares[NeedKind::Warmth as usize];
     let food = shares[NeedKind::Food as usize];
+    let households: Vec<(IVec2, Trade, f32, f32)> = citizens
+        .iter()
+        .filter(|citizen| is_adult(citizen.age))
+        .map(|citizen| {
+            (
+                citizen.home,
+                citizen.trade,
+                citizen.experience[citizen.trade as usize],
+                citizen.age,
+            )
+        })
+        .collect();
     for mut citizen in &mut citizens {
         let rate = if is_adult(citizen.age) {
             1.0
@@ -1592,6 +1765,12 @@ pub fn aging(mut citizens: Query<&mut Citizen>) {
                 citizen.upbringing.stats().of(Stat::Hardiness),
                 citizen.upbringing.prosperity(),
             );
+            // And they take up the house's trade, with some of the practice the
+            // head of it had in the work.
+            if let Some((trade, practice)) = household_head(&households, citizen.home) {
+                citizen.trade = trade;
+                citizen.experience[trade as usize] = inherited_experience(practice);
+            }
         }
         citizen.upbringing.catch_up(age, warmth, food);
     }
@@ -1676,6 +1855,64 @@ pub fn count_buildings(mut built: ResMut<Built>, structures: Query<&Structure>) 
         counts[structure.0 as usize] += 1;
     }
     built.0 = counts;
+}
+
+/// Filling vacancies. Nobody quits, so the only hands going spare are the ones
+/// the colony holds back, and a vacancy goes to one of the best few of them
+/// rather than to the best -- which is what keeps the wrong person occasionally
+/// getting the right job, and the stories that come with it.
+pub fn assign_trades(
+    tick: Res<Tick>,
+    stores: Stores,
+    mayor: Res<Mayor>,
+    mut citizens: Query<(Entity, &Pos, &mut Citizen)>,
+) {
+    if !tick.0.is_multiple_of(ticks_per_season()) {
+        return;
+    }
+    let hands = citizens
+        .iter()
+        .filter(|(_, _, citizen)| is_adult(citizen.age))
+        .count();
+    let mut spare: Vec<(Entity, IVec2, f32)> = Vec::new();
+    for (entity, pos, citizen) in &citizens {
+        if is_adult(citizen.age) && citizen.trade == Trade::Laborer {
+            spare.push((entity, pos.0, citizen.experience[Trade::Laborer as usize]));
+        }
+    }
+    let vacancies = spare.len().saturating_sub(laborers_wanted(hands));
+    if vacancies == 0 {
+        return;
+    }
+
+    let short = if stock_share(stores.granary.food, FOOD_PER_CITIZEN, hands)
+        < stock_share(stores.generator.fuel, FUEL_PER_CITIZEN, hands)
+    {
+        Cargo::Food
+    } else {
+        Cargo::Wood
+    };
+    let trade = trade_for(short);
+    let bias = mayor.trade_bias[trade as usize];
+
+    for filled in 0..vacancies {
+        let scored: Vec<(usize, f32)> = spare
+            .iter()
+            .enumerate()
+            .map(|(index, (_, at, experience))| {
+                let walk = gather_source(&stores.patches, short, *at, false)
+                    .map_or(R, |(cell, _)| (cell - *at).abs().max_element());
+                (index, assignment_score(walk, *experience, bias))
+            })
+            .collect();
+        let Some(taken) = pick_from_top(&scored, noise(tick.0, filled as u64)) else {
+            break;
+        };
+        let (entity, ..) = spare.swap_remove(taken);
+        if let Ok((_, _, mut citizen)) = citizens.get_mut(entity) {
+            citizen.trade = trade;
+        }
+    }
 }
 
 /// Finishes the project in progress, or opens the next one on a free plot once
@@ -1810,6 +2047,9 @@ pub fn colony_growth(
                 needs: Needs::newcomer(),
                 upbringing: Upbringing::born(seed),
                 acclimated: 0.0,
+                // A child is nobody's tradesman until they are grown.
+                trade: Trade::Laborer,
+                experience: [0.0; TRADE_COUNT],
                 age: 0.0,
                 lifespan: lifespan_of(
                     seed,
@@ -1902,23 +2142,39 @@ pub fn citizen_ai(
         if let Some(cargo) = citizen.carrying {
             let drop_off = delivery_target(cargo, colony.construction.diverting, site_pos);
             if (pos.0 - drop_off).abs().max_element() <= 1 {
-                match (cargo, colony.construction.site.as_mut()) {
+                // What a citizen carries home is the one place what the colony
+                // raised in them turns into capacity rather than survival.
+                let raised = citizen.upbringing.stats().of(trade_stat(citizen.trade));
+                let fit = trade_fit(raised, citizen.experience[citizen.trade as usize]);
+                let load = haul_load(effective_stat(raised, FOCUS_UNTIL_MOOD_EXISTS, fit));
+                let yield_each = match cargo {
+                    Cargo::Wood => 1,
+                    Cargo::Food => food_yield(built.of(Building::HuntersHut)),
+                };
+                let brought = load * yield_each;
+                let to_the_site = match (cargo, colony.construction.site.as_ref()) {
                     (Cargo::Wood, Some(site))
                         if log_goes_to_site(drop_off, site.pos, site.delivered, site.building) =>
                     {
-                        site.delivered += 1;
+                        (site.building.rules().cost - site.delivered).min(brought)
                     }
-                    (Cargo::Wood, _) => colony.generator.fuel += 1,
-                    (Cargo::Food, _) => {
-                        colony.granary.food += food_yield(built.of(Building::HuntersHut))
-                    }
+                    _ => 0,
+                };
+                if to_the_site > 0
+                    && let Some(site) = colony.construction.site.as_mut()
+                {
+                    site.delivered += to_the_site;
                 }
-                flow.delivered(match cargo {
-                    Cargo::Wood => 1,
-                    Cargo::Food => food_yield(built.of(Building::HuntersHut)),
-                });
+                match cargo {
+                    Cargo::Wood => colony.generator.fuel += brought - to_the_site,
+                    Cargo::Food => colony.granary.food += brought,
+                }
+                flow.delivered(brought);
                 citizen.carrying = None;
-                let next = haul_choice(citizen.hauling, supply);
+                // A tradesman fetches their own kind; a labourer goes wherever
+                // the colony is shorter.
+                let next = trade_cargo(citizen.trade)
+                    .unwrap_or_else(|| haul_choice(citizen.hauling, supply));
                 if next != citizen.hauling {
                     inbound[citizen.hauling as usize] -= 1;
                     inbound[next as usize] += 1;
@@ -1947,6 +2203,13 @@ pub fn citizen_ai(
         // Only a working citizen has working hours for the cold to take.
         if grown {
             citizen.needs.spend(duty == Duty::WarmUp);
+            // A trade is kept up by working it and goes to rust otherwise.
+            let at_work = matches!(duty, Duty::Gather | Duty::Deliver);
+            for trade in TRADES {
+                let practising = at_work && trade == citizen.trade;
+                citizen.experience[trade as usize] =
+                    experience_step(citizen.experience[trade as usize], practising);
+            }
         }
         let drop_off = citizen.carrying.map_or(CENTER, |cargo| {
             delivery_target(cargo, colony.construction.diverting, site_pos)
@@ -2689,7 +2952,10 @@ mod tests {
     fn mayor_leaning(building: Building, weight: f32) -> Mayor {
         let mut bias = [0.0; BUILDING_COUNT];
         bias[building as usize] = weight;
-        Mayor { bias }
+        Mayor {
+            bias,
+            ..Mayor::default()
+        }
     }
 
     /// A citizen whose only complaint is `kind`, sunk to its low mark.
@@ -4254,6 +4520,177 @@ mod tests {
                 grown,
                 age == ADULT_AGE,
                 "only the last milestone finishes a childhood"
+            );
+        }
+    }
+
+    #[test]
+    fn every_trade_leans_on_a_stat_and_most_of_them_fetch_something() {
+        let mut fetched = Vec::new();
+        for trade in TRADES {
+            let _ = trade_stat(trade);
+            if let Some(cargo) = trade_cargo(trade) {
+                assert!(!fetched.contains(&cargo), "{trade:?} duplicates a trade");
+                fetched.push(cargo);
+            }
+        }
+        assert_eq!(
+            fetched.len(),
+            CARGO_COUNT,
+            "every store wants somebody fetching it"
+        );
+        assert_eq!(
+            trade_cargo(Trade::Laborer),
+            None,
+            "a labourer goes wherever the colony is shorter"
+        );
+    }
+
+    #[test]
+    fn practice_and_the_body_both_count_towards_fitting_the_work() {
+        let raw = trade_fit(FORMATION_NEUTRAL, 0.0);
+        assert!(trade_fit(STAT_MAX, 0.0) > raw, "what a citizen is counts");
+        assert!(
+            trade_fit(FORMATION_NEUTRAL, 1.0) > raw,
+            "so does what they have done"
+        );
+        assert!(trade_fit(STAT_MIN, 0.0) > 0.0, "nobody is worth nothing");
+    }
+
+    #[test]
+    fn fit_does_not_run_away_with_itself() {
+        assert!(trade_fit(STAT_MAX, 1.0) <= FIT_CEILING);
+        assert!(
+            trade_fit(STAT_MAX, 10.0) <= FIT_CEILING,
+            "practice saturates"
+        );
+    }
+
+    #[test]
+    fn the_focus_layer_is_wired_but_empty() {
+        let base = 0.6;
+        assert_eq!(
+            effective_stat(base, FOCUS_UNTIL_MOOD_EXISTS, 1.0),
+            base,
+            "until the mood layer lands, focus must change nothing"
+        );
+        assert!(effective_stat(base, FOCUS_UNTIL_MOOD_EXISTS, 1.5) > base);
+    }
+
+    #[test]
+    fn a_stronger_practised_hauler_carries_more_home() {
+        assert_eq!(haul_load(0.0), 1, "everybody brings something back");
+        assert!(haul_load(FIT_CEILING) > haul_load(0.5));
+    }
+
+    #[test]
+    fn a_nearer_more_practised_citizen_scores_better() {
+        let far = assignment_score(20, 0.0, 0.0);
+        let near = assignment_score(2, 0.0, 0.0);
+        assert!(
+            near > far,
+            "distance is the wrong distance, but it is still a cost"
+        );
+        assert!(assignment_score(2, 1.0, 0.0) > near, "practice counts");
+        assert!(assignment_score(2, 0.0, 1.0) > near, "and the office leans");
+    }
+
+    #[test]
+    fn a_vacancy_goes_to_one_of_the_best_few_rather_than_the_best() {
+        let scored = vec![(0, 9.0), (1, 8.0), (2, 7.0), (3, 1.0)];
+        let mut taken = Vec::new();
+        for roll in 0..20u64 {
+            let pick = pick_from_top(&scored, noise(roll, 7)).expect("somebody is available");
+            assert_ne!(pick, 3, "the hopeless candidate is never in the running");
+            if !taken.contains(&pick) {
+                taken.push(pick);
+            }
+        }
+        assert!(
+            taken.len() > 1,
+            "always the same pick is argmax with extra steps"
+        );
+    }
+
+    #[test]
+    fn an_empty_field_leaves_the_vacancy_open() {
+        assert_eq!(pick_from_top(&[], 0.5), None);
+    }
+
+    #[test]
+    fn practice_is_gained_at_the_work_and_rusts_away_from_it() {
+        let mut experience = 0.0;
+        for _ in 0..(ticks_per_season() * 2) {
+            experience = experience_step(experience, true);
+        }
+        let practised = experience;
+        assert!(practised > 0.0);
+        assert!(practised <= 1.0, "practice tops out");
+        for _ in 0..(ticks_per_season() * 4) {
+            experience = experience_step(experience, false);
+        }
+        assert!(experience < practised, "and goes again if the work stops");
+        assert!(experience >= 0.0);
+    }
+
+    #[test]
+    fn the_colony_holds_back_hands_for_work_no_trade_covers() {
+        for hands in [10usize, 30, 60] {
+            let held = laborers_wanted(hands);
+            let share = held as f32 / hands as f32;
+            assert!(
+                (0.20..=0.25).contains(&share),
+                "{held} of {hands} is {share}, outside the fifth-to-quarter band"
+            );
+        }
+        assert_eq!(laborers_wanted(0), 0);
+    }
+
+    #[test]
+    fn a_child_takes_the_house_trade_with_some_of_the_practice_in_it() {
+        let head = 0.8;
+        let child = inherited_experience(head);
+        assert!(
+            child > 0.0,
+            "a child of the house starts ahead of a stranger"
+        );
+        assert!(child < head, "but not level with the one who did the work");
+    }
+
+    #[test]
+    fn a_child_of_the_house_takes_the_head_of_it_s_trade() {
+        let home = IVec2::new(4, 4);
+        let elsewhere = IVec2::new(9, 9);
+        let adults = [
+            (home, Trade::Hunter, 0.9, 40.0),
+            (home, Trade::Woodcutter, 0.5, 25.0),
+            (elsewhere, Trade::Woodcutter, 1.0, 60.0),
+        ];
+        let (trade, practice) = household_head(&adults, home).expect("the house has a head");
+        assert_eq!(
+            trade,
+            Trade::Hunter,
+            "the oldest of the house, not of the colony"
+        );
+        assert_eq!(practice, 0.9);
+        assert_eq!(
+            household_head(&adults, IVec2::new(1, 1)),
+            None,
+            "a house with no grown citizen in it hands down nothing"
+        );
+    }
+
+    #[test]
+    fn the_founding_party_sets_aside_its_labourers_first() {
+        let mut counts = [0usize; TRADE_COUNT];
+        for index in 0..CITIZENS {
+            counts[founding_trade(index) as usize] += 1;
+        }
+        assert_eq!(counts[Trade::Laborer as usize], laborers_wanted(CITIZENS));
+        for trade in [Trade::Woodcutter, Trade::Hunter] {
+            assert!(
+                counts[trade as usize] > 0,
+                "somebody has to fetch {trade:?}"
             );
         }
     }

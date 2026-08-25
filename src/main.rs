@@ -52,6 +52,7 @@ fn main() {
                 sim::advance_weather,
                 sim::regrow_patches,
                 sim::record_trend,
+                sim::assign_trades,
                 sim::construction,
                 sim::citizen_ai,
                 sim::colony_growth,

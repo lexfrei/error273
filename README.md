@@ -174,6 +174,14 @@ Hardiness is the one a citizen keeps working on. A body left out in air below fr
 
 How long a citizen lives is settled the day their childhood ends, not the day it began: what the colony raised in them, and a part it cannot account for, weighed against each other by how comfortable the colony was while raising them. A colony that was short of everything can read the differences between its people straight off the granary; a comfortable one raises people who differ for reasons it never saw. So two children of one good decade still come out different, and somebody who walks in already grown has only that unaccountable part, since the colony never saw their childhood -- which is what the founding party is made of.
 
+### What a citizen does
+
+Every grown citizen has a trade -- the treelines, the hunting grounds, or none, which means going wherever the colony is shorter. Roughly a fifth of the workforce is deliberately kept in that last group, because a colony with nobody spare has no way to fill a vacancy, and nobody ever quits a trade of their own accord. A vacancy therefore goes to one of the best few of the spare hands rather than to the best of them, scored on how far they are from the work, how much they have practised it, and whichever way the mayor's office happens to be leaning. Distance is measured in king moves, which is exactly the travel time here and deliberately the wrong distance for anything else.
+
+Practice is kept up by doing the work and rusts when it stops, so churning people between trades costs something. A child takes the trade of the oldest grown citizen in their house on the day they are grown, with a fraction of that person's practice already in hand -- which is how a trade can quietly die out with a household.
+
+What a citizen brings to the work is what the colony raised in them, multiplied by how well they fit the trade, and one day multiplied by how well they are holding up. That last is wired in and set to one until there is a mood to put in it.
+
 ### Growing
 
 Each couple gets one roll every eight hours at a chance that adds up to a set probability over a season, scaled by how many beds are standing empty, and only while the colony is not already carrying its share of children who cannot yet work. A colony with room grows; a full one tails off rather than stopping dead, which is the point: births gated on a bed arrive as a cohort, and a cohort of births is a cohort of deaths a lifetime later. A colony that is cold, worn out, hungry, or short of fuel or food has no children at all, and neither does one whose stores are sliding rather than holding, nor one that could not fetch enough for another mouth with a winter's margin left over. Stores say what has been fetched; only the last of those asks whether anyone is left to keep fetching it, which is how a colony can starve with its treelines untouched.
