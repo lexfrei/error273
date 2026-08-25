@@ -2,7 +2,7 @@
 
 What each planned layer will be built out of, and which shipped game each mechanic is taken from. The evidence is in `research/lifecycle.md`, `research/culture.md` and `research/zpg.md`; every entry names the report section so the numbers can be checked against their sources. Layers 1-4 exist in `src/sim.rs`; everything from layer 5 on is a plan.
 
-Two conventions run through the document. A line beginning `Open:` marks a choice the reports leave genuinely undecided, with both options stated and neither picked. A line beginning `Conflicts with ADR NNNN:` marks a research proposal that contradicts a recorded decision.
+Four conventions run through the document. A line beginning `Open:` marks a choice the reports leave genuinely undecided, with both options stated; a line beginning `Conflicts with ADR NNNN:` marks a research proposal that contradicts a recorded decision. Each is followed by the call that was made — `Decision:` for an open choice, `Ruling:` for a conflict. The options and the conflicts are kept rather than edited away, because what was considered and rejected is part of the record.
 
 ## 1. Vision and constraints
 
@@ -42,6 +42,8 @@ RimWorld forces speed back to 1x during any hostile event, which produced years 
 
 Open: whether the "few minutes per year" figure is a promise or an average. Option A caps the accelerator so no year ever completes faster than a fixed floor, keeping the pacing legible at the cost of skipping over quiet stretches more slowly. Option B lets tempo be fully event-driven and drops the fixed-year-length claim from the README, which is what an interrupt loop actually produces ([zpg §4.3](research/zpg.md)).
 
+Decision: option B, with a floor. Tempo is event-driven and the README states an average rather than a promise, with one constant setting the minimum real seconds a game year may take so the watcher can still follow it.
+
 ## 3. Needs, mood, focus
 
 Three quantities, deliberately not one. Fusing them is the most common failure in the sample: Tropico keeps faction standing, citizen approval and happiness loosely coupled, so players find that "approval has nothing to do with how happy factions are directly" while Tropico 5 players get endless rebellions at 70+ happiness because rebels key off standing instead ([culture §3.10](research/culture.md)).
@@ -55,6 +57,8 @@ effective_stat = base_stat * focus_mult * trade_fit_mult
 That product drives output, accident chance and construction quality alike. DF also keeps focus explicitly independent of mood — "a dwarf can be happy even with largely-unmet needs, or unhappy yet focused" — and we keep the same split, because focus drives output while mood drives the vote, and fusing them makes every vote a referendum on productivity ([lifecycle §4.1](research/lifecycle.md)).
 
 Conflicts with ADR 0005: the ADR lists four parallel consequences of a mismatch ("costs output, raises fatigue, and increases accidents and discontent"). Collapsing them into one multiplier with four downstream effects is the same fiction with a quarter of the arithmetic, but it is a different mechanism from the one recorded.
+
+Ruling: adopt the single focus multiplier with its four downstream effects; ADR 0005 is amended to match.
 
 **Continuous ramp with a knee, from Timberborn's failure and Workers & Resources' fix** ([lifecycle §4.9](research/lifecycle.md)). Timberborn's binary flips (Starving = -50% work speed, Thirsty = -25% movement) are its single most-cited balance complaint, with a standing request for gradual penalties. W&R ships the better hybrid: unmet demand costs happiness on every roll, with an amplified penalty once the need drops below 5%. Our mapping: each of warmth, rest and hunger contributes a continuous term to focus with a knee near zero, and the printed output is the band name while the value underneath stays continuous.
 
@@ -72,11 +76,17 @@ This is not decoration. Banished's cohort death wave is the bug we would otherwi
 
 Open: how to desynchronise births. Option A smooths the gate into a per-couple seasonal probability scaled by spare housing. Option B keeps the hard free-bed gate exactly as `colony_growth` has it today and relies on randomised lifespan alone to spread the deaths. The report is explicit that at least one of the two is required ([lifecycle §4.10](research/lifecycle.md)).
 
+Decision: both. Births become a per-couple seasonal probability scaled by spare housing, and lifespan is randomised on Timberborn's ±10% shape, so neither the arrivals nor the deaths land in a cohort.
+
 Open: aging rate. Option A ages citizens 1:1 with the calendar and shortens the natural lifespan to fit a run (Timberborn's whole lifespan is 50 days; Norland runs one year per two real days with a max age in the 50s). Option B keeps a realistic lifespan and multiplies aging, as Banished does at 4-5x per calendar year and Workers & Resources at 12 years per in-game year. Banished's multiplier is the genre's most common immersion complaint and spawned a mod called "one year is one year" whose entire purpose is removing it, and the report's conclusion is that a compressed rate must be paired with hiding the calendar ([lifecycle §2.1, §3.8](research/lifecycle.md)). Option B therefore conflicts with ADR 0002, whose whole point is a visible calendar the balance log already prints.
+
+Decision: option A. Aging runs 1:1 with the calendar and the natural lifespan is shortened to fit a run, with frailty from about age 40 and expected death in the 50s, which keeps ADR 0002's visible calendar honest. The compressed-rate option is rejected.
 
 **Inheritance is structural, from Lords & Villeins** ([lifecycle §4.7](research/lifecycle.md)). There the player never commands individuals, "the profession of a family determined what job they can do... cannot be removed", and a spouse marrying in learns the family's profession. Our mapping: ADR 0005's "children inherit a parent's trade" becomes a household property rather than a probability roll, so a new smith requires a smith's child to survive or a deliberate bad fit. The escape valve is mandatory and both Banished and Ostriv ship it: an unassigned laborer pool that absorbs work no household's trade covers, with Ostriv's guidance of holding 20-25% of the workforce unemployed as reserve.
 
 Open: what carries competence. Option A makes the household the unit, as above, so scarcity of a trade is a demographic fact. Option B stores per-citizen experience for every work type, as Ostriv has since 2017, and lets trade be individual. The two produce different stories: A generates dynasties and hard shortages, B generates drift and personal specialisation.
+
+Decision: both, split by role. Competence is stored as per-citizen experience per work type, while the household supplies the inheritance rule: a child takes the household trade by default and starts with a fraction of the head's experience in it. The 20-25% laborer pool is mandatory rather than advisory.
 
 ## 5. Stats, jobs, assignment friction, debuffs
 
@@ -84,9 +94,13 @@ Open: what carries competence. Option A makes the household the unit, as above, 
 
 Conflicts with ADR 0005: the ADR says per-citizen stats "are only revealed through noisy performance over time", and an adjective on the card *is* the reveal. The resolution the report proposes is to print the adjective only for stats the colony has observed — after N worker-days in a trade that exercises that stat — and to let the printed word be a running estimate that starts wrong and converges. Workers & Resources ships the gated version: loyalty is hidden until the Secret Police install spy equipment in the home.
 
+Ruling: adopt the converging estimate. An adjective is printed only after N observed worker-days and is explicitly the colony's running estimate rather than the true value; ADR 0005 is amended to match.
+
 **Job scoring, from Ostriv and Shining Rock** ([lifecycle §4.4](research/lifecycle.md)). Ostriv's `checkForBetterJob` weighs distance, prior experience with that job type, and wage, with a hard 3,500-unit distance cap added after cross-map-commuting complaints; Shining Rock replaced his own closest-job rule with utility scoring for his next game and picks "one of the top ones" rather than the single best. Our mapping: a vacancy is filled by `score = w_dist * distance + w_exp * experience_in_trade + w_lever * mayor_bias`, sampled from the top few rather than argmax, which buys variety with no extra randomness in the model.
 
 Conflicts with ADR 0005: the ADR specifies "the nearest idle citizen takes an open vacancy". Scoring is a different rule. It still produces mismatches — experience is weighted, not required, and the distance term is deliberately the wrong distance — but the recorded decision says nearest, and the manager rules on which stands.
+
+Ruling: adopt job scoring with top-N sampling. "Nearest" survives as the deliberately wrong distance term inside the score rather than as the rule itself; ADR 0005 is amended to match.
 
 **The distance metric is deliberately cheap and wrong, from DF and Banished** ([lifecycle §4.5](research/lifecycle.md)). DF picks the tile with "minimum distance (in the maximum norm) from the current position, regardless of how long the path to actually get there is", and Banished used straight-line distance with the developer publicly naming it as the flaw. Banished 1.0.3 then split the rule by class: laborers have no distance constraint, other professions stay near home and job unless a job is old and no laborer has taken it; W&R caps the daily search at a ~450 m walking radius. Our mapping: haulers feeding construction get an unbounded radius, trade workers a bounded one, with an ageing-job escape valve. This must be narrated in the chronicle or watchers read it as a pathfinding bug, exactly as Banished's did.
 
@@ -114,7 +128,11 @@ FP2's other number is a warning rather than a model: a 10-week cooldown between 
 
 Conflicts with ADR 0004: the ADR makes the mayor a set of weights *added* to the vote tally, so influence scales the magnitude of a bias. Godville's model makes legitimacy set the *probability* that a directive is followed. These are different mechanisms and only one can be the primary channel. Whichever wins, an ignored directive must emit a chronicle line naming why it was ignored, or unreliability reads as a bug ([zpg §4.12](research/zpg.md)).
 
+Ruling: both, on different channels. Votes keep additive weights whose magnitude legitimacy scales, while directives and policies are obeyed probabilistically with legitimacy as the probability. ADR 0004 stands and is amended to say so, the probabilistic channel is recorded in the new mayor ADR, and an ignored directive always emits a chronicle line naming why.
+
 Open: what the mayor's one economic lever actually is. Ostriv gives the player a town-wide basic wage, a managers' wage, a laborers' wage and a per-building wage percentage, and citizens choose for themselves; the developer's stated reason for refusing direct assignment is that "you can't just assign someone to work in specific place and live with specific spouse because, you know, that's mathematically effective" ([lifecycle §4.3](research/lifecycle.md)). We have no money, so option A is a firewood ration per workplace and option B is hearth priority, meaning how close to the generator that workplace's crew may sleep. Ostriv also ships the failure mode: set the laborers' wage too low and construction starves because everyone prefers a vacant regular slot.
+
+Decision: option A. The lever is a firewood ration per workplace, a visible number that can be voted on and that ties straight into the fire economy. Hearth priority is a later spatial refinement, not the first lever.
 
 **Legitimacy is throughput, not a permission bit, from Old World and Victoria 3** ([culture §2.5, §1](research/culture.md)). Old World converts legitimacy directly into Orders per turn. Victoria 3 bands it Illegitimate below 25 / Unacceptable 25-49 / Contested 50-74 / Legitimate 75-89 / Righteous 90+, with Illegitimate generating +3.0% radical pops against Righteous at +0.05% and -25% opposition approval, and it is the one shipped mechanic in the sample that *forbids* rather than prices: below 25 a government cannot pass laws at all unless a movement endorsing that law has at least 25 activism. Our mapping: legitimacy multiplies the mayor's weight and sets the width of the fringe band described below.
 
@@ -142,6 +160,8 @@ ADR 0006 sets three axes: collectivist-individualist, pious-secular, harsh-lenie
 
 Conflicts with ADR 0006: the ADR says a policy outside the window is "refused with protest and a loss of legitimacy", flat. Nobody in the sample ships a hard window — D4 lets anything pass with enough political capital, SMAC prices simultaneity on an 8n³ curve at 32/108/256/500 for one to four changes, CK3 charges +50% cost and +25% time to *replace* a tradition rather than fill an empty slot, Frostpunk 1 charges irreversibility ([culture §2.1](research/culture.md)). Keeping a hard outer edge is defensible, but without a fringe band in front of it the mayor's only legible move at the boundary is to do nothing.
 
+Ruling: adopt three bands, with the fringe band in front of a hard outer edge; ADR 0006 is amended to match.
+
 **Two clocks on every policy, from Democracy 4** ([culture §4.3](research/culture.md)). D4 splits immediate anger from slow normalisation: legalising cannabis angers conservatives on the turn it passes, but its long-run effect is "increased liberalism, and people get used to the idea". Our mapping: each policy carries a `shock` (an immediate mood and legitimacy delta scaled by each citizen's axis distance from the policy) and a `normalisation` (a small per-season pull of the window edge toward the policy, applied only while the policy remains in force).
 
 **Cynicism closes the enact-repeal exploit, from Democracy 4** ([culture §4.4](research/culture.md)). D4's Cynicism rises from flip-flopping, from bribing voters before an election and from hurting them after one, and decays only by being forgotten. Our mapping: repealing a policy within N seasons of enacting it raises colony Cynicism, which caps legitimacy *gain* until it ages out. Without this, the two-clock model above becomes a free window-shifting engine.
@@ -154,6 +174,8 @@ Conflicts with ADR 0006: the ADR says a policy outside the window is "refused wi
 
 Open: where cards come from. Option A buys them with ritual outcomes, as RimWorld's fluid ideoligion earns development points from rituals and conversions, which makes section 9's entertainers the source of cultural change. Option B lets cards be born only from colony events and denied petitions, as DF's denial "can make it into memory", which keeps the culture reactive and needs no currency. The two produce very different entertainers.
 
+Decision: option B for births. Cards are born from colony events and denied petitions with no development-point currency; entertainers instead multiply transmission and normalisation, and rituals keep paying mood, a work-speed buff and axis pushes without ever buying a card.
+
 **Eradication is priced in a second currency and imprints, from Tropico 3, Frostpunk 2 and Stellaris** ([culture §4.12, §4.21](research/culture.md)). Tropico 3's Outlaw Faction costs $15,000 and "up to half" of the removed supporters become rebels, while Book BBQ removes 50% of Intellectual supporters *and* halves the immigration chance for that leaning — stock and inflow both. FP2's Round Up arrests up to 500 faction members and causes "a large increase in Tension"; Stellaris Suppress cuts attraction 75% but costs 50% approval. Our mapping: eradicating a card strips it from carriers, cuts its transmission rate at birth and by contact, converts a fraction of ex-carriers into active contestants, and stamps a Fear of Authority card on every witness. That new card widens the harsh edge of the window while reducing all legitimacy gain.
 
 That asymmetry is the direct fix for Frostpunk 1's degenerate loop, where control laws can be escalated until "hope will never be a problem again" and the only penalty is a judgemental epilogue ([culture §3.1](research/culture.md)). Harshness must buy room and cost standing, or the loop collapses. The second half of the fix is RimWorld's leaky bucket: slave suppression decays by up to 20% per day against a 45-day base rebellion interval, so coercion is an ongoing upkeep rather than a one-time purchase ([culture §1](research/culture.md)). And Tropico 5's "killing a non-rebel by order: +1 threat" is the cleanest precedent for suppression feeding the number it is meant to reduce ([culture §4.20](research/culture.md)).
@@ -161,6 +183,8 @@ That asymmetry is the direct fix for Frostpunk 1's degenerate loop, where contro
 **Dying cards re-concentrate, then the bonus caps, from CK3** ([culture §4.13](research/culture.md)). Below 40% fervor an organised CK3 faith risks a heresy converting 10-25 counties, and every ruler who defects returns +15% fervor to the religion they left — losing the extremes re-concentrates the core.
 
 Conflicts with ADR 0006: the ADR says traditions die "with their last carrier". A re-concentration bonus makes the tail harder to kill. Resolution: cap the bonus so extinction stays reachable but never cheap, and apply the eradication transmission penalty as a multiplier *after* the small-population bonus, so persecution still concentrates the faithful but cannot outrun a sustained campaign.
+
+Ruling: adopt the capped re-concentration bonus with the eradication transmission penalty applied after it, which leaves "dies with its last carrier" literally true; ADR 0006 is amended to match.
 
 ## 9. Entertainers
 
@@ -184,9 +208,13 @@ Tropico adds the last term: entertainment buildings are scored on service *quali
 
 Conflicts with ADR 0007: the ADR makes "an event log under the map" the primary interface. At 230 real seconds per game year a feed scrolls faster than anyone reads, so comprehension has to be carried by a sparse permanent record browsable by year, with the feed reduced to a peripheral ticker. The ADR's conclusion that naming individual citizens becomes necessary survives either way.
 
+Ruling: the sparse permanent record is the primary carrier of comprehension and the rolling feed is a peripheral ticker; ADR 0007 is amended to match.
+
 **A three-scale event ribbon, from RimWorld's History screen** ([zpg §4.9](research/zpg.md)). RimWorld runs a ribbon of coloured circles above its wealth and population graphs, one per event, blue or white for positive-or-neutral, yellow for negative, red for attacks, filterable to the last 300 / 100 / 30 days. Our mapping: one line of glyphs per season under the map, coloured by valence, expandable to per-day and per-hour. Prose cannot answer "what kind of year was this" at our tempo; this can.
 
 Open: whether the ribbon uses colour. Option A uses stable colour semantics and requires a colour-capable terminal. Option B encodes valence in glyph shape only, keeping the output pure text at the cost of a slower read.
+
+Decision: both, glyph first. Valence is encoded in glyph shape as the primary channel and colour reinforces it where the terminal supports it, so the monochrome output stays readable on its own.
 
 **Budget the terminal and make the sidebar the index, from Brogue** ([zpg §4.16](research/zpg.md)). Brogue fixes 100 columns by 34 rows: a 20-column sidebar, a 79x29 map, 3 message lines and two reserved bottom rows, one permanently flavour text. The sidebar lists entities nearest-first at two rows each, so about 16 fit, and each screen row maps back to a map position so the sidebar doubles as the cycle target list. Our mapping: a fixed sidebar of the citizens who currently matter most — which makes ranking mandatory, since a 40-citizen colony cannot fit — plus a bounded chronicle area with an archive key. Brogue's message handling supplies the rest: a `--MORE--` gate, a 340-line archive, and repeats collapsed into a counter capped at 100.
 
@@ -206,19 +234,21 @@ This section ships before the mechanics that make spirals possible, not after. D
 
 Open: what the terminal state is. Option A keeps the README's premise — the forest is finite, so every run ends frozen — and invests entirely in making the ending readable. Option B adds a reachable survival end, the winter that ends or the city that outlives its founders, so a run has two distinguishable outcomes and the anti-spiral work has something to protect.
 
+Decision: option B. A run has two outcomes: colony death stays a chronicle chapter with an epitaph, and a reachable survival end arrives with the seasons layer, either surviving a fixed number of winters or the city outliving its founders.
+
 One more failure worth naming: full autonomy with no override reads as unfairness rather than difficulty. Timberborn players report beavers dying of thirst next to water, including pump operators who will not drink at their own pump, and its two top-voted requests are for manual assignment ([lifecycle §3.3](research/lifecycle.md)). The closer the player is to zero control, the more the simulation must visibly explain its own bad decisions — which is why section 5's deliberately wrong distance metric is only affordable alongside section 10's chronicle.
 
 ## 12. Roadmap mapping
 
 | Design section | Task | Mechanics chosen | ADR |
 | --- | --- | --- | --- |
-| 6 Construction and voting | 5, 6 | Timberborn delivery-gated build in 10% steps; vote on worst unmet need with derivable proposals; FP2 supermajority for mayor-empowering proposals | update 0004 |
-| 4 Lifecycle | 7 | RimWorld frailty instead of death-by-age; Timberborn lifespan ±10%; Timberborn pyramid as output; Lords & Villeins household trade with a laborer pool at 20-25% | new 0009 |
-| 5 Stats, jobs, friction | 8 | DF bucketed adjectives against the colony median; Ostriv job scoring with top-N sampling; DF/Banished wrong-distance metric split by job class; Against the Storm two fit axes; DF skill rust | update 0005 |
-| 3 Needs, mood, focus | 9 | DF focus banded 140/101/81/61 at ±50% effective skill; W&R continuous ramp with a knee below 5%; RimWorld mood target vs bar, rates per game day | new 0010 |
-| 9 Entertainers | 9 | RimWorld ritual-quality sum with an outcome distribution and a work-speed payout; Sims-capped advertisement with top-N arbitration; RimWorld tolerance at 2/3 of gain, boredom band 50/30 | new 0011 |
-| 8 Culture axes and cards | 10 | D4 impressionability clamped 15-85%; percentile-derived window; D4 shock vs normalisation; D4 cynicism; CK3 -0.01/year anti-ratchet toward a card baseline; RimWorld 4-6 card cap; Tropico 3 eradication shape | update 0006 |
-| 7 Mayor panel | 11 | Godville scarce probabilistic budget with one expensive deterministic act; Old World and Vic3 legitimacy as throughput with three inflows; Tropico 7 position-gated policy set; FP grace ultimatum with a named scapegoat; D4 and FP2 contestation pipeline; Tropico 5 split unrest scale from participants; DF priced petitions | new 0012, update 0004 |
-| 10 Chronicle and legibility | 12 | CK2 on_action hooks over a closed event enum; DCSS-style routing table shared with the tempo controller; RimWorld three-scale ribbon; Brogue fixed layout, message collapsing, two RNG streams and enforced contrast | update 0007 |
-| 2 Clocks and tempo | 12 | Aurora interrupt-driven advance; KSP one-hour pre-roll with per-sub-step re-forecast; tunable slow-down thresholds | update 0007 |
-| 11 Anti-spiral and ending | after 12 | RimWorld threat budget with Starting 0.7-1.0 and Adaptation 0.4-1.47; expectations falling after losses; a planned, readable ending | new 0013 |
+| 6 Construction and voting | 5, 6 | Timberborn delivery-gated build in 10% steps; vote on worst unmet need with derivable proposals; FP2 supermajority for mayor-empowering proposals | 0004 (amended) |
+| 4 Lifecycle | 7 | RimWorld frailty instead of death-by-age; Timberborn lifespan ±10%; Timberborn pyramid as output; Lords & Villeins household trade with a laborer pool at 20-25% | 0009 |
+| 5 Stats, jobs, friction | 8 | DF bucketed adjectives against the colony median; Ostriv job scoring with top-N sampling; DF/Banished wrong-distance metric split by job class; Against the Storm two fit axes; DF skill rust | 0005 (amended) |
+| 3 Needs, mood, focus | 9 | DF focus banded 140/101/81/61 at ±50% effective skill; W&R continuous ramp with a knee below 5%; RimWorld mood target vs bar, rates per game day | 0010, 0005 (amended) |
+| 9 Entertainers | 9 | RimWorld ritual-quality sum with an outcome distribution and a work-speed payout; Sims-capped advertisement with top-N arbitration; RimWorld tolerance at 2/3 of gain, boredom band 50/30 | 0011 |
+| 8 Culture axes and cards | 10 | D4 impressionability clamped 15-85%; percentile-derived window; D4 shock vs normalisation; D4 cynicism; CK3 -0.01/year anti-ratchet toward a card baseline; RimWorld 4-6 card cap; Tropico 3 eradication shape | 0006 (amended) |
+| 7 Mayor panel | 11 | Godville scarce probabilistic budget with one expensive deterministic act; Old World and Vic3 legitimacy as throughput with three inflows; Tropico 7 position-gated policy set; FP grace ultimatum with a named scapegoat; D4 and FP2 contestation pipeline; Tropico 5 split unrest scale from participants; DF priced petitions | 0012, 0004 (amended) |
+| 10 Chronicle and legibility | 12 | CK2 on_action hooks over a closed event enum; DCSS-style routing table shared with the tempo controller; RimWorld three-scale ribbon; Brogue fixed layout, message collapsing, two RNG streams and enforced contrast | 0007 (amended) |
+| 2 Clocks and tempo | 12 | Aurora interrupt-driven advance; KSP one-hour pre-roll with per-sub-step re-forecast; tunable slow-down thresholds | 0007 (amended) |
+| 11 Anti-spiral and ending | after 12 | RimWorld threat budget with Starting 0.7-1.0 and Adaptation 0.4-1.47; expectations falling after losses; a planned, readable ending | 0013 |
