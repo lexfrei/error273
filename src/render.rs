@@ -1,7 +1,8 @@
 use bevy::prelude::*;
 
 use crate::sim::{
-    CENTER, Citizen, Construction, Forest, Generator, HOUSE_WOOD_COST, House, Pos, R, Tick,
+    CENTER, Calendar, Citizen, Construction, Forest, Generator, HOUSE_WOOD_COST, House, Pos, R,
+    Tick,
 };
 
 pub fn clear_screen() {
@@ -10,6 +11,7 @@ pub fn clear_screen() {
 
 pub fn render(
     tick: Res<Tick>,
+    calendar: Res<Calendar>,
     generator: Res<Generator>,
     forest: Res<Forest>,
     construction: Res<Construction>,
@@ -52,8 +54,15 @@ pub fn render(
         None => "  -  ".to_string(),
     };
     out.push_str(&format!(
-        "tick {:5}  pop {:3}  houses {:3}  build {}  fuel {:4}  forest {:4}\n",
+        "tick {:5}  year {}  {:<6}  day {:2}  hour {:02}\n",
         tick.0,
+        calendar.year,
+        calendar.season.name(),
+        calendar.day,
+        calendar.hour
+    ));
+    out.push_str(&format!(
+        "pop {:3}  houses {:3}  build {}  fuel {:4}  forest {:4}\n",
         alive,
         houses.iter().count(),
         site,

@@ -1,5 +1,35 @@
 use bevy::prelude::*;
 
+// Nested game clocks. How fast a tick arrives in real time is a separate knob
+// in the app wiring; these four numbers define game time and nothing else.
+pub const TICKS_PER_HOUR: u64 = 1;
+pub const HOURS_PER_DAY: u64 = 24;
+pub const DAYS_PER_SEASON: u64 = 30;
+pub const SEASONS_PER_YEAR: u64 = 4;
+
+pub const fn ticks_per_day() -> u64 {
+    TICKS_PER_HOUR * HOURS_PER_DAY
+}
+
+pub const fn ticks_per_season() -> u64 {
+    ticks_per_day() * DAYS_PER_SEASON
+}
+
+pub const fn ticks_per_year() -> u64 {
+    ticks_per_season() * SEASONS_PER_YEAR
+}
+
+/// Simulation rates are written in game-hour or game-day terms and converted
+/// here, so no rate constant is a bare per-tick number that silently rescales
+/// when the length of a day changes.
+pub const fn per_hour(rate: f32) -> f32 {
+    rate / TICKS_PER_HOUR as f32
+}
+
+pub const fn per_day(rate: f32) -> f32 {
+    rate / ticks_per_day() as f32
+}
+
 pub const R: i32 = 18;
 pub const CENTER: IVec2 = IVec2::new(R, R);
 pub const AMBIENT: f32 = -30.0;
@@ -8,13 +38,13 @@ pub const HEAT_FALLOFF: f32 = 3.0;
 // Fuel stocked above this level cannot make the fire any hotter; below it the
 // grate is banked low and the warm zone shrinks with the pile.
 pub const FULL_BURN_FUEL: u32 = 20;
-pub const BURN_EVERY: u64 = 4;
+pub const BURN_EVERY: u64 = 4 * TICKS_PER_HOUR;
 pub const CITIZENS: usize = 30;
 pub const FOREST_CELLS: usize = 8;
 pub const WOOD_PER_CELL: u32 = 40;
 pub const WARMTH_MAX: f32 = 100.0;
-pub const WARMTH_GAIN: f32 = 2.0;
-pub const WARMTH_DRAIN: f32 = 1.0;
+pub const WARMTH_GAIN: f32 = per_hour(2.0);
+pub const WARMTH_DRAIN: f32 = per_hour(1.0);
 // A house is shelter, not a stove: it only slows the bleed of body heat.
 pub const SHELTER_DRAIN_FACTOR: f32 = 0.7;
 // Hysteresis: go warm up below the low mark, head back to work above the high
@@ -22,8 +52,8 @@ pub const SHELTER_DRAIN_FACTOR: f32 = 0.7;
 pub const WARMTH_LOW: f32 = 25.0;
 pub const WARMTH_HIGH: f32 = 75.0;
 pub const FATIGUE_MAX: f32 = 100.0;
-pub const FATIGUE_GAIN: f32 = 1.0;
-pub const FATIGUE_RECOVERY: f32 = 4.0;
+pub const FATIGUE_GAIN: f32 = per_day(24.0);
+pub const FATIGUE_RECOVERY: f32 = per_hour(4.0);
 // Same hysteresis idea as warmth, so nobody twitches on the doorstep.
 pub const FATIGUE_HIGH: f32 = 60.0;
 pub const FATIGUE_LOW: f32 = 10.0;
@@ -38,7 +68,7 @@ pub const HOUSE_WOOD_COST: u32 = 12;
 // to a building site, and a project is not abandoned the moment it dips.
 pub const FUEL_SPARE_HIGH: u32 = 45;
 pub const FUEL_SPARE_LOW: u32 = 25;
-pub const BIRTH_EVERY: u64 = 8;
+pub const BIRTH_EVERY: u64 = 8 * TICKS_PER_HOUR;
 pub const BIRTH_FUEL_MIN: u32 = 40;
 pub const GROWTH_WARM_MARK: f32 = 60.0;
 pub const GROWTH_WARM_SHARE: f32 = 0.7;
@@ -50,6 +80,59 @@ pub const START_WARMTH: f32 = 80.0;
 
 #[derive(Resource, Default)]
 pub struct Tick(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Season {
+    Spring,
+    Summer,
+    Autumn,
+    Winter,
+}
+
+impl Season {
+    fn from_index(index: u64) -> Season {
+        match index % SEASONS_PER_YEAR {
+            0 => Season::Spring,
+            1 => Season::Summer,
+            2 => Season::Autumn,
+            _ => Season::Winter,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Season::Spring => "Spring",
+            Season::Summer => "Summer",
+            Season::Autumn => "Autumn",
+            Season::Winter => "Winter",
+        }
+    }
+}
+
+/// The game date behind the tick counter. Hours read like a clock and start at
+/// zero; days and years are calendar labels and start at one.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Calendar {
+    pub hour: u64,
+    pub day: u64,
+    pub season: Season,
+    pub year: u64,
+}
+
+impl Default for Calendar {
+    fn default() -> Self {
+        calendar_at(0)
+    }
+}
+
+pub fn calendar_at(tick: u64) -> Calendar {
+    Calendar {
+        hour: tick / TICKS_PER_HOUR % HOURS_PER_DAY,
+        day: tick / ticks_per_day() % DAYS_PER_SEASON + 1,
+        season: Season::from_index(tick / ticks_per_season()),
+        year: tick / ticks_per_year() + 1,
+    }
+}
 
 #[derive(Resource)]
 pub struct Generator {
@@ -326,6 +409,10 @@ pub fn setup(mut commands: Commands) {
 
 pub fn advance_tick(mut tick: ResMut<Tick>) {
     tick.0 += 1;
+}
+
+pub fn advance_calendar(tick: Res<Tick>, mut calendar: ResMut<Calendar>) {
+    *calendar = calendar_at(tick.0);
 }
 
 pub fn burn_fuel(tick: Res<Tick>, mut generator: ResMut<Generator>, citizens: Query<&Citizen>) {
@@ -863,6 +950,83 @@ mod tests {
         assert!(
             !log_goes_to_site(CENTER, site, 0),
             "wood headed for the fire stays there"
+        );
+    }
+
+    #[test]
+    fn the_clock_starts_at_the_first_hour_of_the_first_day() {
+        let start = calendar_at(0);
+        assert_eq!(start.hour, 0);
+        assert_eq!(start.day, 1, "calendars have no day zero");
+        assert_eq!(start.season, Season::Spring);
+        assert_eq!(start.year, 1, "calendars have no year zero");
+    }
+
+    #[test]
+    fn nested_clocks_roll_over_into_one_another() {
+        assert_eq!(ticks_per_day(), TICKS_PER_HOUR * HOURS_PER_DAY);
+        assert_eq!(ticks_per_season(), ticks_per_day() * DAYS_PER_SEASON);
+        assert_eq!(ticks_per_year(), ticks_per_season() * SEASONS_PER_YEAR);
+
+        let next_day = calendar_at(ticks_per_day());
+        assert_eq!(next_day.hour, 0);
+        assert_eq!(next_day.day, 2);
+        assert_eq!(next_day.season, Season::Spring);
+
+        let next_season = calendar_at(ticks_per_season());
+        assert_eq!(next_season.day, 1, "a season starts on its first day");
+        assert_eq!(next_season.season, Season::Summer);
+        assert_eq!(next_season.year, 1);
+
+        let next_year = calendar_at(ticks_per_year());
+        assert_eq!(next_year.season, Season::Spring);
+        assert_eq!(next_year.year, 2);
+    }
+
+    #[test]
+    fn the_last_hour_of_a_year_has_not_rolled_over_yet() {
+        let last = calendar_at(ticks_per_year() - 1);
+        assert_eq!(last.year, 1);
+        assert_eq!(last.season, Season::Winter);
+        assert_eq!(last.day, DAYS_PER_SEASON);
+        assert_eq!(last.hour, HOURS_PER_DAY - 1);
+    }
+
+    #[test]
+    fn the_calendar_never_reads_off_its_own_dials() {
+        for tick in (0..ticks_per_year() * 3).step_by(7) {
+            let now = calendar_at(tick);
+            assert!(now.hour < HOURS_PER_DAY);
+            assert!(now.day >= 1 && now.day <= DAYS_PER_SEASON);
+            assert!(now.year >= 1);
+        }
+    }
+
+    #[test]
+    fn the_seasons_run_in_order_and_wrap() {
+        let order = [
+            Season::Spring,
+            Season::Summer,
+            Season::Autumn,
+            Season::Winter,
+        ];
+        assert_eq!(order.len(), SEASONS_PER_YEAR as usize);
+        for (i, expected) in order.iter().enumerate() {
+            assert_eq!(calendar_at(i as u64 * ticks_per_season()).season, *expected);
+        }
+        assert_eq!(
+            calendar_at(SEASONS_PER_YEAR * ticks_per_season()).season,
+            Season::Spring
+        );
+    }
+
+    #[test]
+    fn rates_written_per_hour_and_per_day_agree_with_the_clock() {
+        assert_eq!(per_hour(1.0) * TICKS_PER_HOUR as f32, 1.0);
+        assert_eq!(per_day(24.0), per_hour(24.0 / HOURS_PER_DAY as f32));
+        assert!(
+            per_day(1.0) < per_hour(1.0),
+            "a daily rate is the slower one"
         );
     }
 }
