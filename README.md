@@ -136,6 +136,14 @@ Warmth, rest and hunger are the same kind of thing: a level from 0 to 100 where 
 
 Warmth gains 2 an hour in the heat and loses 1 an hour in the cold. Its two marks are the exception to being fixed: they are the cost of walking home from where the citizen is standing, plus a margin of 25, so at the fire they are the 25 and 75 they always were and they rise with every cell walked away from it. A mark that does not know how far the fire is has no term for the walk: at fifty cells out, turning for home at 25 is turning on schedule, walking correctly, and dying twenty-five ticks short. The gap between the marks never moves, which is the part that stops anybody oscillating on a doorstep. Rest wears down by 24 over a working day and comes back at 4 an hour asleep, acting below 40 until it reaches 90. Hunger slips by 7 a day and is settled in one sitting, acting below 30. Eating is the exception to one-thing-at-a-time: a hungry citizen standing at the granary takes a meal whatever else is on their mind, so nobody starves on a full store because the cold happened to be worse.
 
+### What a citizen has to give
+
+Being cold, tired or hungry costs a citizen the same thing, and it costs it once. Everything that could go wrong for a worker -- an unmet need, a trade they were never suited to -- resolves into one number, and that number scales what they are worth at the work rather than each cause taking its own bite. One readable figure explains why somebody is underperforming, where four parallel penalties explain nothing and stack into a collapse nobody watching can follow.
+
+It is a ceiling of one that falls. A citizen with nothing the matter is at full focus and gets no bonus for thriving; what a colony gains by doing well is paid somewhere else entirely, and keeping this number capped is what leaves the game with a state that can be compared against.
+
+Nothing is charged for the ordinary cycle of a need. Warmth falls, a citizen goes to the fire, warmth climbs: that is control working, and it is free. What costs focus is a need past the mark where somebody is already acting on it and still going down, and the last of a need costs more than the first, because a need at a tenth is a different thing from a need at half. The word printed beside a citizen -- focused, unfocused, distracted, badly distracted -- is a name for the number and nothing in the simulation reads it.
+
 ### The year
 
 The air outside the generator's reach follows the calendar: a cosine through the year, mildest in the middle of summer and harshest in the middle of winter, drifting a little each day rather than stepping at a season boundary. A colony gets one winter to learn on -- the first is scaled back and the cold reaches full depth by the third -- and the ramp is on the cold half only, so summers do not get worse with the years.

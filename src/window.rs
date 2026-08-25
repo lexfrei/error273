@@ -13,8 +13,8 @@ use bevy::window::WindowResolution;
 
 use crate::sim::{
     Air, BUILDINGS, Building, CENTER, Cargo, Citizen, Construction, GENERATOR_HEAT, NeedKind,
-    Patches, Pos, Regard, STAT_COUNT, STATS, Structure, VIEW_RADIUS, estimate, is_known, median,
-    on_frame, regard_of,
+    Patches, Pos, Regard, STAT_COUNT, STATS, Structure, VIEW_RADIUS, estimate, focus_band,
+    focus_of, is_known, median, on_frame, regard_of,
 };
 use crate::status::{CitizenCard, Readings, STATUS_LINES, Status, status_lines};
 
@@ -240,6 +240,7 @@ fn paint_status(
                 words[stat as usize] = regard_of(guess, stats[stat as usize]);
             }
             CitizenCard {
+                focus: focus_band(focus_of(&citizen.needs)),
                 seed: citizen.seed,
                 age: citizen.age,
                 words,

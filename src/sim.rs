@@ -323,9 +323,24 @@ pub const FIT_FLOOR: f32 = 0.5;
 pub const FIT_STAT: f32 = 0.6;
 pub const FIT_PRACTICE: f32 = 0.5;
 pub const FIT_CEILING: f32 = 1.8;
-/// Hard-wired until the mood layer fills it. The shape is here so that layer
-/// has somewhere to land without touching anything that reads a stat.
-pub const FOCUS_UNTIL_MOOD_EXISTS: f32 = 1.0;
+/// How heavily a need weighs when the colony works out how distracted somebody
+/// is. Warmth, rest and hunger are the top tier together; recreation and social
+/// enter below it, which is what keeps them from competing with survival in a
+/// crisis rather than needing a rule that says they must not.
+pub const NEED_WEIGHT_SURVIVAL: f32 = 10.0;
+/// The worst focus a citizen can be reduced to, and where the amplified part of
+/// the cost starts biting. Half is the floor because that is the penalty the
+/// shape this is taken from tops out at; the knee is near the bottom because a
+/// need at a tenth is a different thing from a need at half.
+pub const FOCUS_FLOOR: f32 = 0.5;
+pub const FOCUS_KNEE: f32 = 15.0;
+/// How much heavier a point of a need costs below the knee than above it.
+pub const FOCUS_KNEE_BITE: f32 = 1.0;
+/// Where the bands fall. Display only: the value underneath is continuous, and
+/// nothing in the simulation reads a band.
+pub const FOCUS_UNFOCUSED: f32 = 0.95;
+pub const FOCUS_DISTRACTED: f32 = 0.85;
+pub const FOCUS_BADLY: f32 = 0.7;
 /// What anybody carries, before what they are is counted. One, because a load
 /// is taken from the patch at the moment it is picked up and a trip that lifted
 /// nothing would still have stripped the treeline.
@@ -563,6 +578,79 @@ pub fn trade_fit(stat: f32, experience: f32) -> f32 {
 
 /// What a citizen brings to the work. `focus_mult` is one until the mood layer
 /// exists to move it.
+/// What a citizen is losing to one need going unmet, weighted against the
+/// others. Continuous all the way down, with the last of a need costing more
+/// than the first of it, because a need at a tenth is a different thing from a
+/// need at half and a penalty that switches on at a line reads as arbitrary.
+///
+/// It is measured from the mark a citizen starts acting at and not from the one
+/// the need counts as met at, which is the same line the ballot's burden is
+/// counted past and for the same reason: a need swinging through its own band
+/// on schedule is control working, and charging a citizen for the ordinary
+/// cycle of being warm, getting cold and going back to the fire is charging
+/// them for doing their job. Measured from met, the colony died on every world
+/// tried, in its seventies at best and its fourth year at worst.
+fn focus_cost(kind: NeedKind, level: f32) -> f32 {
+    let rules = kind.rules();
+    let short = ((rules.low - level) / rules.low).clamp(0.0, 1.0);
+    let bite = ((FOCUS_KNEE - level) / FOCUS_KNEE).clamp(0.0, 1.0);
+    rules.weight * (short + bite * FOCUS_KNEE_BITE)
+}
+
+/// The one multiplier every mismatch resolves into.
+///
+/// It is a ceiling of one that falls, and never a band that rises. Focus answers
+/// what is wrong with a citizen; what is going right for a colony is paid
+/// through a different channel entirely -- the colony-wide work-speed buff a
+/// landed ritual hands out under ADR 0011 -- and the two have different readers.
+/// Nothing thriving may be paid for in here, or there is no longer any state of
+/// the colony that is invariant to compare a change against.
+pub fn focus_of(needs: &Needs) -> f32 {
+    let cost: f32 = NEEDS
+        .into_iter()
+        .map(|kind| focus_cost(kind, needs.level(kind)))
+        .sum();
+    let worst: f32 = NEEDS
+        .into_iter()
+        .map(|kind| kind.rules().weight * (1.0 + FOCUS_KNEE_BITE))
+        .sum();
+    1.0 - (1.0 - FOCUS_FLOOR) * (cost / worst)
+}
+
+/// What the colony would call that number. Four bands and not the five the
+/// shape is borrowed from, because the fifth is the bonus half and there is no
+/// bonus half here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Focused,
+    Unfocused,
+    Distracted,
+    BadlyDistracted,
+}
+
+impl Focus {
+    pub fn name(self) -> &'static str {
+        match self {
+            Focus::Focused => "focused",
+            Focus::Unfocused => "unfocused",
+            Focus::Distracted => "distracted",
+            Focus::BadlyDistracted => "badly distracted",
+        }
+    }
+}
+
+pub fn focus_band(focus: f32) -> Focus {
+    if focus >= FOCUS_UNFOCUSED {
+        Focus::Focused
+    } else if focus >= FOCUS_DISTRACTED {
+        Focus::Unfocused
+    } else if focus >= FOCUS_BADLY {
+        Focus::Distracted
+    } else {
+        Focus::BadlyDistracted
+    }
+}
+
 pub fn effective_stat(base: f32, focus_mult: f32, trade_fit_mult: f32) -> f32 {
     base * focus_mult * trade_fit_mult
 }
@@ -821,6 +909,8 @@ pub struct NeedRules {
     pub high: f32,
     /// Level at or above which the need counts as comfortably met.
     pub comfort: f32,
+    /// What this need is worth against the others when focus is worked out.
+    pub weight: f32,
     pub fatal: bool,
 }
 
@@ -833,6 +923,7 @@ impl NeedKind {
                 low: 25.0,
                 high: 75.0,
                 comfort: 60.0,
+                weight: NEED_WEIGHT_SURVIVAL,
                 fatal: true,
             },
             NeedKind::Rest => NeedRules {
@@ -843,6 +934,7 @@ impl NeedKind {
                 // Rest counts as met so long as a citizen is not actually spent:
                 // working through the band is the normal state, not a shortage.
                 comfort: 41.0,
+                weight: NEED_WEIGHT_SURVIVAL,
                 fatal: false,
             },
             NeedKind::Food => NeedRules {
@@ -851,6 +943,7 @@ impl NeedKind {
                 low: 30.0,
                 high: 90.0,
                 comfort: 40.0,
+                weight: NEED_WEIGHT_SURVIVAL,
                 fatal: true,
             },
         }
@@ -3323,7 +3416,7 @@ pub fn citizen_ai(
             let raised = citizen.upbringing.stats().of(trade_stat(citizen.trade));
             let fit = trade_fit(raised, citizen.experience[citizen.trade as usize]);
             let (wanted, banked) = haul_load(
-                effective_stat(raised, FOCUS_UNTIL_MOOD_EXISTS, fit),
+                effective_stat(raised, focus_of(&citizen.needs), fit),
                 citizen.banked,
             );
             let lifted = colony.patches.take(cell, wanted);
@@ -5840,11 +5933,11 @@ mod tests {
     fn the_focus_layer_is_wired_but_empty() {
         let base = 0.6;
         assert_eq!(
-            effective_stat(base, FOCUS_UNTIL_MOOD_EXISTS, 1.0),
+            effective_stat(base, 1.0, 1.0),
             base,
             "until the mood layer lands, focus must change nothing"
         );
-        assert!(effective_stat(base, FOCUS_UNTIL_MOOD_EXISTS, 1.5) > base);
+        assert!(effective_stat(base, 1.0, 1.5) > base);
     }
 
     /// What a citizen averages over many trips, which is what the colony feels.
@@ -7225,5 +7318,104 @@ mod tests {
             site,
             "and a project under way comes before a shed"
         );
+    }
+
+    /// A citizen with every need at the mark it counts as met at.
+    fn contented() -> Needs {
+        let mut needs = Needs::newcomer();
+        for kind in NEEDS {
+            set(&mut needs, kind, kind.rules().comfort, false);
+        }
+        needs
+    }
+
+    fn all_at(level: f32) -> Needs {
+        let mut needs = Needs::newcomer();
+        for kind in NEEDS {
+            set(&mut needs, kind, level, level <= kind.rules().low);
+        }
+        needs
+    }
+
+    #[test]
+    fn a_citizen_with_nothing_the_matter_is_at_full_focus() {
+        assert_eq!(focus_of(&contented()), 1.0, "nothing unmet, nothing lost");
+        assert_eq!(
+            focus_of(&all_at(NEED_MAX)),
+            1.0,
+            "and being better than met buys nothing -- focus is a ceiling"
+        );
+    }
+
+    #[test]
+    fn focus_never_leaves_its_own_range() {
+        for level in 0..=100 {
+            let focus = focus_of(&all_at(level as f32));
+            assert!(
+                (FOCUS_FLOOR..=1.0).contains(&focus),
+                "focus {focus} at level {level} is outside its range"
+            );
+        }
+        assert_eq!(
+            focus_of(&all_at(0.0)),
+            FOCUS_FLOOR,
+            "the worst is the floor"
+        );
+    }
+
+    #[test]
+    fn focus_falls_without_a_step_in_it() {
+        let mut previous = focus_of(&all_at(NEED_MAX));
+        let mut biggest = 0.0f32;
+        for level in (0..=100).rev() {
+            let focus = focus_of(&all_at(level as f32));
+            assert!(
+                focus <= previous + f32::EPSILON,
+                "focus rose as a need fell"
+            );
+            biggest = biggest.max(previous - focus);
+            previous = focus;
+        }
+        assert!(
+            biggest < (1.0 - FOCUS_FLOOR) / 4.0,
+            "one point of a need took {biggest} of focus, which is a step and not a slope"
+        );
+    }
+
+    #[test]
+    fn the_last_of_a_need_costs_more_than_the_first_of_it() {
+        let comfort = NeedKind::Warmth.rules().comfort;
+        let near_the_top = focus_of(&all_at(comfort)) - focus_of(&all_at(comfort - 10.0));
+        let near_the_bottom = focus_of(&all_at(10.0)) - focus_of(&all_at(0.0));
+        assert!(
+            near_the_bottom > near_the_top * 1.5,
+            "the knee has to bite: {near_the_bottom} against {near_the_top}"
+        );
+    }
+
+    #[test]
+    fn every_need_the_colony_has_weighs_the_same_as_the_others() {
+        for kind in NEEDS {
+            assert_eq!(
+                kind.rules().weight,
+                NEED_WEIGHT_SURVIVAL,
+                "{kind:?} is not in the tier it belongs to"
+            );
+        }
+    }
+
+    #[test]
+    fn the_band_is_a_word_for_the_number_and_nothing_more() {
+        assert_eq!(focus_band(1.0), Focus::Focused);
+        assert_eq!(focus_band(FOCUS_FLOOR), Focus::BadlyDistracted);
+        let mut seen = Vec::new();
+        for step in 0..=100 {
+            let focus = FOCUS_FLOOR + (1.0 - FOCUS_FLOOR) * step as f32 / 100.0;
+            let band = focus_band(focus);
+            if seen.last() != Some(&band) {
+                seen.push(band);
+            }
+        }
+        assert_eq!(seen.len(), 4, "four bands, walked bottom to top, each once");
     }
 }

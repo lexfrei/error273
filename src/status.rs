@@ -3,8 +3,8 @@ use bevy::prelude::*;
 
 use crate::sim::{
     ADULT_AGE, BUILDING_COUNT, BUILDINGS, Ballot, Building, CENTER, Calendar, Cargo, Construction,
-    FRAILTY_ONSET, Missing, NEAR_GROUND, Outside, Patches, Regard, STAT_COUNT, STATS, Stores,
-    couples, is_adult,
+    FRAILTY_ONSET, Focus, Missing, NEAR_GROUND, Outside, Patches, Regard, STAT_COUNT, STATS,
+    Stores, couples, is_adult,
 };
 
 pub const STATUS_LINES: usize = 5;
@@ -72,6 +72,10 @@ pub struct CitizenCard {
     pub words: [Regard; STAT_COUNT],
     pub watched: f32,
     pub known: bool,
+    /// How much of themselves this one has to give the work today. Unlike the
+    /// three stats it is not an estimate and not hidden: anybody watching a
+    /// citizen can see they are distracted.
+    pub focus: Focus,
 }
 
 /// The five lines under the map, and the whole of what the headless build
@@ -148,7 +152,7 @@ pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
         ),
         match &status.card {
             Some(card) => format!(
-                "eldest #{:<3} {:2.0}y  {}  watched {:3.0}d {}",
+                "eldest #{:<3} {:2.0}y  {}  {:<16} watched {:3.0}d {}",
                 card.seed,
                 card.age,
                 STATS
@@ -160,6 +164,7 @@ pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
                     ))
                     .collect::<Vec<String>>()
                     .join(" "),
+                card.focus.name(),
                 card.watched,
                 if card.known { "" } else { "(a guess)" }
             ),

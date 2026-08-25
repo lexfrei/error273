@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use crate::sim::{
     BUILDINGS, Cargo, Citizen, Patches, Pos, Regard, STAT_COUNT, STATS, Structure, estimate,
-    is_known, median, on_frame, regard_of, world_is_bounded,
+    focus_band, focus_of, is_known, median, on_frame, regard_of, world_is_bounded,
 };
 use crate::status::{CitizenCard, Readings, Status, status_lines};
 
@@ -53,6 +53,7 @@ pub fn print_status(
                 words[stat as usize] = regard_of(guess, stats[stat as usize]);
             }
             CitizenCard {
+                focus: focus_band(focus_of(&citizen.needs)),
                 seed: citizen.seed,
                 age: citizen.age,
                 words,
