@@ -129,6 +129,23 @@ pub const FRONT_CAP: f32 = 8.0;
 pub const FRONT_SALT: u64 = 0x71;
 pub const SPELL_SALT: u64 = 0x72;
 
+/// What share of itself a colony has to bury in one winter before the survivors
+/// stop measuring against the year they had, how much of a bad thing they feel
+/// while that lasts, and how long it lasts.
+///
+/// A colony that has just buried a third of itself is not hurt by cold and
+/// hunger in the measure it was a season ago, because it is no longer measuring
+/// against the same year; the same circumstances weigh less, survivors need
+/// less to stay level, and it wears off.
+///
+/// It moves nothing a citizen acts on. Lowering the mark somebody sets out for
+/// warmth at would send them out later and kill them; this is about what a day
+/// costs them to live through, which is a different question with a different
+/// reader.
+pub const LOSS_SHARE: f32 = 0.25;
+pub const EXPECTATIONS_AFTER_LOSS: f32 = 0.6;
+pub const EXPECTATIONS_SEASONS: u64 = 4;
+
 /// The most the weather may ever take off the air in one spell.
 ///
 /// This is the hurt-but-not-kill rule as a number. A budgeted event may push a
@@ -761,13 +778,34 @@ pub fn thoughts_of(
 /// Where a mood is headed: the base everybody starts from, plus whatever is
 /// being held. Instant, and never the number that is printed -- what is printed
 /// is chasing this.
-pub fn mood_target(held: &[bool; THOUGHT_COUNT]) -> f32 {
+pub fn mood_target(held: &[bool; THOUGHT_COUNT], spared: bool) -> f32 {
     MOOD_BASE
         + THOUGHTS
             .into_iter()
             .filter(|thought| held[*thought as usize])
-            .map(Thought::weight)
+            .map(|thought| {
+                let weight = thought.weight();
+                // Only what hurts is discounted. What is going right is worth
+                // the same to a survivor as to anybody else, because
+                // expectations falling is about the floor and not the ceiling.
+                if spared && weight < 0.0 {
+                    weight * EXPECTATIONS_AFTER_LOSS
+                } else {
+                    weight
+                }
+            })
             .sum::<f32>()
+}
+
+/// Whether a season took enough of the colony to change what its survivors
+/// measure against.
+pub fn season_broke_them(began_with: usize, buried: u64) -> bool {
+    began_with > 0 && buried as f32 >= began_with as f32 * LOSS_SHARE
+}
+
+/// When expectations come back up again.
+pub fn spared_until(now: u64) -> u64 {
+    now + EXPECTATIONS_SEASONS * ticks_per_season()
 }
 
 /// One tick of a mood chasing its target: quicker up than down, and standing
@@ -1992,6 +2030,10 @@ pub struct Citizen {
     /// What the years have done to them, under the mood and far slower. The
     /// culture layer will read this; nothing does yet.
     pub hardship: f32,
+    /// Until when this one is measuring against a worse year than the colony
+    /// used to have. Set by a winter that took a share of the colony, and it
+    /// runs out.
+    pub spared_until: u64,
     /// Where this citizen is walking to look, if the colony has sent them out.
     /// A scout brings back the map and nothing else.
     pub scouting: Option<IVec2>,
@@ -2325,10 +2367,22 @@ impl Default for Weather {
     }
 }
 
-/// Deaths since anybody last looked. The grace a colony earns is spent by them,
-/// so somebody has to count them, and the weather is who asks.
+/// Deaths, counted twice over: since anybody last looked, which the weather
+/// clears when it has spent the grace they cost, and since the colony was
+/// founded, which nobody clears because a winter is weighed against it.
 #[derive(Resource, Default)]
-pub struct Toll(pub u32);
+pub struct Toll {
+    pub recent: u32,
+    pub ever: u64,
+}
+
+/// The season the colony is in: how many it started with, and how many it had
+/// buried by then.
+#[derive(Resource, Default)]
+pub struct Reckoning {
+    pub began_with: usize,
+    pub buried_by_then: u64,
+}
 
 /// The air outside the generator's reach at the hour a tick falls on, before
 /// the weather is added to it.
@@ -3161,6 +3215,7 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
                 mood: MOOD_BASE,
                 held: [false; THOUGHT_COUNT],
                 hardship: 0.0,
+                spared_until: 0,
             },
         ));
     }
@@ -3296,8 +3351,8 @@ pub fn advance_weather(
 ) {
     let (weather, toll) = (&mut sky.weather, &mut sky.toll);
     // Grace is earned and spent by the tick, because a death happens on one.
-    weather.adaptation = adaptation_step(weather.adaptation, toll.0 > 0);
-    toll.0 = 0;
+    weather.adaptation = adaptation_step(weather.adaptation, toll.recent > 0);
+    toll.recent = 0;
 
     // The weather moves once a day and the climate and the hour move with every
     // tick, so the front and the spell are stepped on the day boundary and
@@ -3412,6 +3467,40 @@ pub fn send_scouts(
                 looking_for.unwrap_or_else(|| scout_target(setting_out, citizen.seed, tick.0))
             });
     }
+}
+
+/// What a winter cost, weighed when it is over.
+///
+/// A colony that has just buried a share of itself measures the next seasons
+/// against a worse year than the one it had, so the same cold and the same
+/// hunger weigh less on whoever came through. It touches nothing anybody acts
+/// on -- lowering the mark somebody sets out for warmth at would send them out
+/// later and kill them -- only what a day costs them to live through.
+///
+/// It is weighed every season and not only after a winter, which is a departure
+/// from the letter of ADR 0013 and was forced by measurement: across five worlds
+/// the worst winter took five per cent of a colony and the worst autumn took
+/// twenty-seven, because the cold arrives while the colony is still working to
+/// a summer pattern and by winter whoever could not bear it is already gone.
+/// Keyed to winters the rule never once fired in nearly four hundred years.
+pub fn weigh_the_season(
+    tick: Res<Tick>,
+    mut reckoning: ResMut<Reckoning>,
+    toll: Res<Toll>,
+    mut citizens: Query<&mut Citizen>,
+) {
+    if !tick.0.is_multiple_of(ticks_per_season()) {
+        return;
+    }
+    let buried = toll.ever.saturating_sub(reckoning.buried_by_then);
+    if season_broke_them(reckoning.began_with, buried) {
+        let until = spared_until(tick.0);
+        for mut citizen in &mut citizens {
+            citizen.spared_until = until;
+        }
+    }
+    reckoning.began_with = citizens.iter().count();
+    reckoning.buried_by_then = toll.ever;
 }
 
 /// The colony keeps only the world it is standing in. Everything else goes back
@@ -3708,6 +3797,7 @@ pub fn colony_growth(
                 mood: MOOD_BASE,
                 held: [false; THOUGHT_COUNT],
                 hardship: 0.0,
+                spared_until: 0,
             },
         ));
     }
@@ -3804,13 +3894,14 @@ pub fn citizen_ai(
         citizen.held = thoughts_of(&citizen.needs, &marks, fit < 1.0, somebody_missing, plenty);
         citizen.mood = mood_step(
             citizen.mood,
-            mood_target(&citizen.held),
+            mood_target(&citizen.held, tick.0 < citizen.spared_until),
             duty == Duty::Rest && at_home,
         );
         citizen.hardship = hardship_step(citizen.hardship, citizen.mood);
         if citizen.needs.spent() {
             colony.missing.take_note(pos.0, tick.0);
-            colony.toll.0 += 1;
+            colony.toll.recent += 1;
+            colony.toll.ever += 1;
             commands.entity(entity).despawn();
             continue;
         }
@@ -3828,7 +3919,8 @@ pub fn citizen_ai(
             );
             if cold_takes(resistance, roll) {
                 colony.missing.take_note(pos.0, tick.0);
-                colony.toll.0 += 1;
+                colony.toll.recent += 1;
+                colony.toll.ever += 1;
                 commands.entity(entity).despawn();
                 continue;
             }
@@ -7936,7 +8028,7 @@ mod tests {
         assert!(!held[Thought::Worn as usize]);
         assert!(!held[Thought::Missing as usize]);
         assert_eq!(
-            mood_target(&held),
+            mood_target(&held, false),
             MOOD_BASE + Thought::Plenty.weight(),
             "the target is the base plus what is actually being felt"
         );
@@ -7964,7 +8056,7 @@ mod tests {
         assert!(cold[Thought::Missing as usize]);
         assert!(!cold[Thought::Plenty as usize]);
         assert!(
-            mood_target(&cold) < mood_target(&nothing_the_matter()),
+            mood_target(&cold, false) < mood_target(&nothing_the_matter(), false),
             "and the total follows the names rather than replacing them"
         );
     }
@@ -8416,5 +8508,56 @@ mod tests {
         );
         assert!(deep > shallow, "and deeper ones: {deep} against {shallow}");
         assert!(deep <= BUDGET_CEILING, "but never past the ceiling");
+    }
+
+    #[test]
+    fn a_survivor_feels_the_same_cold_less() {
+        let bad = thoughts_of(&all_at(1.0), &at_the_fire(), true, true, false);
+        let ordinary = mood_target(&bad, false);
+        let spared = mood_target(&bad, true);
+        assert!(
+            spared > ordinary,
+            "the same winter should weigh less on somebody who has just buried a third of the colony: {spared} against {ordinary}"
+        );
+        assert!(spared < MOOD_BASE, "it weighs less, not nothing");
+    }
+
+    #[test]
+    fn what_is_going_right_is_worth_the_same_to_everybody() {
+        let good = thoughts_of(&contented(), &at_the_fire(), false, false, true);
+        assert_eq!(
+            mood_target(&good, true),
+            mood_target(&good, false),
+            "expectations falling is about what hurts, never about what helps"
+        );
+    }
+
+    #[test]
+    fn a_season_has_to_take_a_share_before_it_changes_anybody() {
+        let began = 40;
+        assert!(!season_broke_them(
+            began,
+            (began as f32 * LOSS_SHARE) as u64 - 1
+        ));
+        assert!(season_broke_them(
+            began,
+            (began as f32 * LOSS_SHARE).ceil() as u64
+        ));
+        assert!(
+            !season_broke_them(0, 0),
+            "a colony nobody was left in did not have a bad winter, it ended"
+        );
+    }
+
+    #[test]
+    fn expectations_come_back_up_after_the_seasons_they_are_given() {
+        let began = 1_000;
+        let until = spared_until(began);
+        assert_eq!(
+            until,
+            began + EXPECTATIONS_SEASONS * ticks_per_season(),
+            "it lasts the seasons it says it lasts"
+        );
+        assert!(until > began);
     }
 }

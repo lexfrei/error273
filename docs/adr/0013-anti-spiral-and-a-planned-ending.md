@@ -1,7 +1,8 @@
 # 0013. Anti-spiral measures and a planned ending
 
-- Status: proposed
+- Status: accepted, in part deferred
 - Date: 2026-08-25
+- Amended: 2026-08-25
 
 ## Context
 
@@ -14,3 +15,13 @@ Crisis severity is a budget computed from population and stockpiles rather than 
 ## Consequences
 
 Blunting the spiral costs some of the tragedy the setting is built on, and that trade is made deliberately because the watcher has no way to intervene. This layer ships before the mechanics that make spirals possible, not after them.
+
+## Amendment, 2026-08-25, on what was built
+
+**The budget landed as written and its ceiling is a measured number rather than a stated one.** Severity comes from population and stores per head, times the first-year ramp the winters already used, times a grace that rises with quiet time and drops when somebody dies. What it buys is spells of weather with an onset, so the air shows the approach rather than only the aftermath. Over eleven hundred spells the deepest reached the cap exactly and the worst single one took 5.9% of the colony's people, 5.6% of its fuel and 26.8% of its food -- enough to finish a colony that is already marginal, not enough to erase a healthy one.
+
+**Expectations fall after any season that takes a share, not only after a winter.** This is a departure from the decision above and it was forced by measurement. Across five worlds the worst winter took five per cent of a colony and the worst autumn took twenty-seven: the cold arrives while the colony is still working to a summer pattern, and by the time winter is deep whoever could not bear it has already gone. Keyed to winters the rule never fired once in nearly four hundred years of running. Keyed to seasons it fires as intended and rarely -- one season in thirty-one on the world that had that autumn, sparing twenty-two of thirty-nine survivors.
+
+**The lever is on the mood and never on a survival mark.** A survivor feels every bad thought less for four seasons; what is going right is worth the same to them as to anybody. Lowering the mark a citizen sets out for warmth at would send them out later and kill them, which is the opposite of a mitigation.
+
+**The planned ending is not in this layer.** Colony death is still an exit and not a chapter, and the survival end waits with it: both are the chronicle's, and this ADR is accepted for its anti-spiral half alone.

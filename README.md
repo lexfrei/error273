@@ -170,6 +170,8 @@ How deep and how often is not rolled. It is a budget worked out from what the co
 
 Treelines and hunting grounds grow back a little every day towards a cap of their own, in spring, summer and autumn. Nothing grows back in winter, which is what makes winter a thing to be survived rather than worked through: whatever is standing when it starts is the whole of what there is until spring. For the same reason the colony will not break ground on a project in winter, and will not break ground at all unless it holds half again what it wants per head behind the fire.
 
+A colony that has just buried a quarter of itself stops measuring against the year it had. For the next four seasons everything that was going wrong weighs less on whoever came through -- the same cold, the same hunger, felt against a worse recent memory -- while everything that is going right is worth exactly what it was. It changes nothing anybody acts on: the mark a citizen sets out for warmth at is untouched, because lowering that would send them out later and kill them. What it changes is what a day costs them to live through.
+
 ### The fire
 
 The generator adds up to 66 on top of whatever the air is doing at its own cell, and 3 less for every cell of distance, so on an average day a well-fed fire holds the freezing line about thirteen cells out and in deep winter closer to nine -- inside the treelines, which is when hauling starts to cost body heat. It only burns that hot when at least twenty units are stacked up; below that the grate is banked low and the warm ring shrinks with the woodpile, which is why the collapse feeds itself. Each boiler raises the ceiling by 18.
