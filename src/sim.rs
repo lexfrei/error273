@@ -121,10 +121,16 @@ pub const HOUSE_RING_STEP: i32 = 2;
 // Keep a margin between the outermost house ring and the patches on the rim.
 pub const HOUSE_MAX_RADIUS: i32 = R - 3;
 pub const HOUSE_WOOD_COST: u32 = 12;
+pub const HUT_WOOD_COST: u32 = 16;
+pub const BOILER_WOOD_COST: u32 = 24;
+// How much further a boiler pushes the generator's ceiling once the woodpile
+// can keep it fed.
+pub const UPGRADE_HEAT: f32 = 18.0;
+pub const BUILDING_COUNT: usize = 3;
 // Hysteresis on the colony's wood policy: only a comfortable stock is diverted
 // to a building site, and a project is not abandoned the moment it dips.
-pub const FUEL_SPARE_HIGH: u32 = 45;
-pub const FUEL_SPARE_LOW: u32 = 25;
+pub const FUEL_SPARE_HIGH: u32 = 58;
+pub const FUEL_SPARE_LOW: u32 = 30;
 
 pub const BIRTH_EVERY: u64 = 8 * TICKS_PER_HOUR;
 pub const BIRTH_FUEL_MIN: u32 = 40;
@@ -344,14 +350,71 @@ pub struct Construction {
 
 pub struct Site {
     pub pos: IVec2,
+    pub building: Building,
     pub delivered: u32,
 }
 
 #[derive(Component)]
 pub struct Pos(pub IVec2);
 
+/// What a citizen can put up. Systems walk `BUILDINGS` rather than naming each
+/// kind, so a fourth building costs one table entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Building {
+    House,
+    HuntersHut,
+    GeneratorUpgrade,
+}
+
+pub const BUILDINGS: [Building; BUILDING_COUNT] = [
+    Building::House,
+    Building::HuntersHut,
+    Building::GeneratorUpgrade,
+];
+
+#[derive(Debug, Clone, Copy)]
+pub struct BuildingRules {
+    pub cost: u32,
+    pub glyph: char,
+    pub name: &'static str,
+}
+
+impl Building {
+    pub fn rules(self) -> BuildingRules {
+        match self {
+            Building::House => BuildingRules {
+                cost: HOUSE_WOOD_COST,
+                glyph: 'H',
+                name: "House",
+            },
+            Building::HuntersHut => BuildingRules {
+                cost: HUT_WOOD_COST,
+                glyph: 'V',
+                name: "Hut",
+            },
+            Building::GeneratorUpgrade => BuildingRules {
+                cost: BOILER_WOOD_COST,
+                glyph: 'B',
+                name: "Boiler",
+            },
+        }
+    }
+}
+
+/// A finished building standing on a plot.
 #[derive(Component)]
-pub struct House;
+pub struct Structure(pub Building);
+
+/// How many of each building stand, recounted every tick so nothing has to be
+/// kept in step by hand.
+#[derive(Resource, Default)]
+pub struct Built([usize; BUILDING_COUNT]);
+
+impl Built {
+    pub fn of(&self, building: Building) -> usize {
+        self.0[building as usize]
+    }
+}
 
 #[derive(Component)]
 pub struct Citizen {
@@ -381,8 +444,9 @@ pub fn ring_pos(radius: f32, angle: f32) -> IVec2 {
         )
 }
 
-pub fn generator_output(fuel: u32) -> f32 {
-    (fuel as f32 / FULL_BURN_FUEL as f32).min(1.0) * GENERATOR_HEAT
+pub fn generator_output(fuel: u32, upgrades: usize) -> f32 {
+    let ceiling = GENERATOR_HEAT + upgrades as f32 * UPGRADE_HEAT;
+    (fuel as f32 / FULL_BURN_FUEL as f32).min(1.0) * ceiling
 }
 
 pub fn heat_at(p: IVec2, output: f32) -> f32 {
@@ -505,7 +569,7 @@ pub fn patch_sites() -> Vec<Patch> {
 
 /// Fixed site for the n-th house, filling one ring before moving outward so
 /// that adding a house never displaces the ones already standing.
-pub fn house_site(index: usize) -> Option<IVec2> {
+pub fn plot_site(index: usize) -> Option<IVec2> {
     let ring = index / HOUSES_PER_RING;
     let radius = HOUSE_RING_START + ring as i32 * HOUSE_RING_STEP;
     if radius > HOUSE_MAX_RADIUS {
@@ -526,18 +590,24 @@ pub fn free_home(sites: &[IVec2], homes: &[IVec2]) -> Option<IVec2> {
         .copied()
 }
 
-/// Lowest plot with no house on it. Houses only ever go up, so this is simply
-/// the next slot in the ring order.
-pub fn next_house_site(existing: &[IVec2]) -> Option<IVec2> {
+/// Lowest plot with nothing on it. Buildings only ever go up, so this is simply
+/// the next slot in the ring order, shared by every kind.
+pub fn next_plot(existing: &[IVec2]) -> Option<IVec2> {
     (0usize..)
-        .map(house_site)
+        .map(plot_site)
         .take_while(Option::is_some)
         .flatten()
         .find(|site| !existing.contains(site))
 }
 
-pub fn burn_amount(population: usize) -> u32 {
-    1 + (population / POP_PER_EXTRA_BURN) as u32
+pub fn burn_amount(population: usize, upgrades: usize) -> u32 {
+    1 + (population / POP_PER_EXTRA_BURN) as u32 + upgrades as u32
+}
+
+/// What one haul of game puts in the granary. Every hut standing means the
+/// carcass comes back dressed rather than dragged whole.
+pub fn food_yield(huts: usize) -> u32 {
+    1 + huts as u32
 }
 
 pub fn update_diverting(diverting: bool, fuel: u32) -> bool {
@@ -558,14 +628,40 @@ pub fn delivery_target(cargo: Cargo, diverting: bool, site: Option<IVec2>) -> IV
     }
 }
 
-pub fn should_start_building(diverting: bool, free_bed: bool) -> bool {
-    diverting && !free_bed
+/// The building that answers a given need, and the whole of the mapping: every
+/// need has exactly one remedy and every building is somebody's.
+pub fn building_for(kind: NeedKind) -> Building {
+    match kind {
+        NeedKind::Warmth => Building::GeneratorUpgrade,
+        NeedKind::Rest => Building::House,
+        NeedKind::Food => Building::HuntersHut,
+    }
 }
 
-/// Whether a log carried to `drop_off` becomes part of the house rather than
-/// fuel. Timber past what the house needs would be thrown away, so it burns.
-pub fn log_goes_to_site(drop_off: IVec2, site_pos: IVec2, delivered: u32) -> bool {
-    drop_off == site_pos && delivered < HOUSE_WOOD_COST
+/// What the colony most needs put up, judged by which need the fewest citizens
+/// have comfortably met. Beds come first when there are none to be had: with
+/// every bed taken, nothing else the colony builds will let it grow.
+pub fn needed_building(shares: [f32; NEED_COUNT], free_bed: bool) -> Building {
+    if !free_bed {
+        return Building::House;
+    }
+    // `min_by` keeps the first of any equals, so ties resolve in table order.
+    let worst = NEEDS
+        .into_iter()
+        .min_by(|a, b| shares[*a as usize].total_cmp(&shares[*b as usize]))
+        .expect("the need table is never empty");
+    building_for(worst)
+}
+
+/// Whether a log carried to `drop_off` joins the project rather than the fire.
+/// Timber past what the project needs would be thrown away, so it burns.
+pub fn log_goes_to_site(
+    drop_off: IVec2,
+    site_pos: IVec2,
+    delivered: u32,
+    building: Building,
+) -> bool {
+    drop_off == site_pos && delivered < building.rules().cost
 }
 
 /// Share of the colony that has each need comfortably met.
@@ -593,9 +689,9 @@ pub fn colony_thrives(shares: [f32; NEED_COUNT], fuel: u32, food: u32) -> bool {
 
 pub fn setup(mut commands: Commands) {
     let houses = CITIZENS.div_ceil(HOUSE_CAPACITY);
-    let sites: Vec<IVec2> = (0..houses).filter_map(house_site).collect();
+    let sites: Vec<IVec2> = (0..houses).filter_map(plot_site).collect();
     for site in &sites {
-        commands.spawn((Pos(*site), House));
+        commands.spawn((Pos(*site), Structure(Building::House)));
     }
 
     let mut homes: Vec<IVec2> = Vec::new();
@@ -627,39 +723,66 @@ pub fn advance_calendar(tick: Res<Tick>, mut calendar: ResMut<Calendar>) {
     *calendar = calendar_at(tick.0);
 }
 
-pub fn burn_fuel(tick: Res<Tick>, mut generator: ResMut<Generator>, citizens: Query<&Citizen>) {
+pub fn burn_fuel(
+    tick: Res<Tick>,
+    built: Res<Built>,
+    mut generator: ResMut<Generator>,
+    citizens: Query<&Citizen>,
+) {
     if tick.0.is_multiple_of(BURN_EVERY) {
-        let burned = burn_amount(citizens.iter().count());
+        let burned = burn_amount(
+            citizens.iter().count(),
+            built.of(Building::GeneratorUpgrade),
+        );
         generator.fuel = generator.fuel.saturating_sub(burned);
     }
 }
 
-/// Finishes the house in progress, or opens a new plot once the beds are full.
+pub fn count_buildings(mut built: ResMut<Built>, structures: Query<&Structure>) {
+    let mut counts = [0usize; BUILDING_COUNT];
+    for structure in &structures {
+        counts[structure.0 as usize] += 1;
+    }
+    built.0 = counts;
+}
+
+/// Finishes the project in progress, or opens the next one on a free plot once
+/// the colony has timber to spare.
 pub fn construction(
     mut commands: Commands,
     mut construction: ResMut<Construction>,
     generator: Res<Generator>,
-    houses: Query<&Pos, With<House>>,
+    structures: Query<(&Pos, &Structure)>,
     citizens: Query<&Citizen>,
 ) {
     construction.diverting = update_diverting(construction.diverting, generator.fuel);
 
     if let Some(site) = &construction.site {
-        if site.delivered >= HOUSE_WOOD_COST {
-            commands.spawn((Pos(site.pos), House));
+        if site.delivered >= site.building.rules().cost {
+            commands.spawn((Pos(site.pos), Structure(site.building)));
             construction.site = None;
         }
         return;
     }
-
-    let sites: Vec<IVec2> = houses.iter().map(|pos| pos.0).collect();
-    let homes: Vec<IVec2> = citizens.iter().map(|citizen| citizen.home).collect();
-    let free_bed = free_home(&sites, &homes).is_some();
-    if !should_start_building(construction.diverting, free_bed) {
+    if !construction.diverting {
         return;
     }
-    if let Some(pos) = next_house_site(&sites) {
-        construction.site = Some(Site { pos, delivered: 0 });
+
+    let taken: Vec<IVec2> = structures.iter().map(|(pos, _)| pos.0).collect();
+    let beds: Vec<IVec2> = structures
+        .iter()
+        .filter(|(_, structure)| structure.0 == Building::House)
+        .map(|(pos, _)| pos.0)
+        .collect();
+    let homes: Vec<IVec2> = citizens.iter().map(|citizen| citizen.home).collect();
+    let people: Vec<Needs> = citizens.iter().map(|citizen| citizen.needs).collect();
+    let building = needed_building(met_shares(&people), free_home(&beds, &homes).is_some());
+    if let Some(pos) = next_plot(&taken) {
+        construction.site = Some(Site {
+            pos,
+            building,
+            delivered: 0,
+        });
     }
 }
 
@@ -670,13 +793,17 @@ pub fn colony_growth(
     tick: Res<Tick>,
     generator: Res<Generator>,
     granary: Res<Granary>,
-    houses: Query<&Pos, With<House>>,
+    houses: Query<(&Pos, &Structure)>,
     citizens: Query<&Citizen>,
 ) {
     if !tick.0.is_multiple_of(BIRTH_EVERY) {
         return;
     }
-    let sites: Vec<IVec2> = houses.iter().map(|pos| pos.0).collect();
+    let sites: Vec<IVec2> = houses
+        .iter()
+        .filter(|(_, structure)| structure.0 == Building::House)
+        .map(|(pos, _)| pos.0)
+        .collect();
     let homes: Vec<IVec2> = citizens.iter().map(|citizen| citizen.home).collect();
     let Some(home) = free_home(&sites, &homes) else {
         return;
@@ -698,6 +825,7 @@ pub fn colony_growth(
 
 pub fn citizen_ai(
     mut commands: Commands,
+    built: Res<Built>,
     mut generator: ResMut<Generator>,
     mut granary: ResMut<Granary>,
     mut patches: ResMut<Patches>,
@@ -706,7 +834,7 @@ pub fn citizen_ai(
 ) {
     // One reading for the whole tick, so a citizen's luck does not depend on the
     // order the deliveries happen to land in.
-    let output = generator_output(generator.fuel);
+    let output = generator_output(generator.fuel, built.of(Building::GeneratorUpgrade));
     let site_pos = construction.site.as_ref().map(|site| site.pos);
     let population = citizens.iter().count();
 
@@ -744,12 +872,12 @@ pub fn citizen_ai(
             if (pos.0 - drop_off).abs().max_element() <= 1 {
                 match (cargo, construction.site.as_mut()) {
                     (Cargo::Wood, Some(site))
-                        if log_goes_to_site(drop_off, site.pos, site.delivered) =>
+                        if log_goes_to_site(drop_off, site.pos, site.delivered, site.building) =>
                     {
                         site.delivered += 1;
                     }
                     (Cargo::Wood, _) => generator.fuel += 1,
-                    (Cargo::Food, _) => granary.food += 1,
+                    (Cargo::Food, _) => granary.food += food_yield(built.of(Building::HuntersHut)),
                 }
                 citizen.carrying = None;
                 citizen.hauling =
@@ -791,9 +919,9 @@ mod tests {
 
     /// Every plot the colony could ever build on, so invariants are checked
     /// across the whole set rather than the first ring or two.
-    fn every_house_site() -> Vec<IVec2> {
+    fn every_plot() -> Vec<IVec2> {
         (0usize..)
-            .map(house_site)
+            .map(plot_site)
             .take_while(Option::is_some)
             .flatten()
             .collect()
@@ -812,7 +940,7 @@ mod tests {
 
     #[test]
     fn heat_falls_off_with_distance() {
-        let output = generator_output(FULL_BURN_FUEL);
+        let output = generator_output(FULL_BURN_FUEL, 0);
         let near = heat_at(CENTER + IVec2::new(1, 0), output);
         let far = heat_at(CENTER + IVec2::new(10, 0), output);
         assert!(near > far);
@@ -821,7 +949,7 @@ mod tests {
 
     #[test]
     fn heat_is_ambient_when_generator_is_off() {
-        let dead = generator_output(0);
+        let dead = generator_output(0, 0);
         assert_eq!(heat_at(CENTER, dead), AMBIENT);
         assert_eq!(heat_at(CENTER + IVec2::new(5, 5), dead), AMBIENT);
     }
@@ -842,11 +970,11 @@ mod tests {
 
     #[test]
     fn a_starved_generator_puts_out_less_heat() {
-        assert_eq!(generator_output(0), 0.0);
-        assert!(generator_output(FULL_BURN_FUEL / 2) < generator_output(FULL_BURN_FUEL));
-        assert_eq!(generator_output(FULL_BURN_FUEL), GENERATOR_HEAT);
+        assert_eq!(generator_output(0, 0), 0.0);
+        assert!(generator_output(FULL_BURN_FUEL / 2, 0) < generator_output(FULL_BURN_FUEL, 0));
+        assert_eq!(generator_output(FULL_BURN_FUEL, 0), GENERATOR_HEAT);
         assert_eq!(
-            generator_output(FULL_BURN_FUEL * 10),
+            generator_output(FULL_BURN_FUEL * 10, 0),
             GENERATOR_HEAT,
             "a full stock cannot be burned faster than the grate allows"
         );
@@ -855,7 +983,7 @@ mod tests {
     #[test]
     fn the_warm_zone_shrinks_as_the_stock_runs_down() {
         let warm_radius = |fuel| {
-            let output = generator_output(fuel);
+            let output = generator_output(fuel, 0);
             (0..=R)
                 .filter(|d| heat_at(CENTER + IVec2::new(*d, 0), output) > 0.0)
                 .count()
@@ -869,10 +997,10 @@ mod tests {
     fn citizens_fall_back_to_their_own_roof_when_the_square_goes_cold() {
         let home = IVec2::new(3, 4);
         assert_eq!(
-            warmth_target(generator_output(FULL_BURN_FUEL), home),
+            warmth_target(generator_output(FULL_BURN_FUEL, 0), home),
             CENTER
         );
-        assert_eq!(warmth_target(generator_output(0), home), home);
+        assert_eq!(warmth_target(generator_output(0, 0), home), home);
     }
 
     #[test]
@@ -1081,7 +1209,7 @@ mod tests {
         let home = IVec2::new(3, 4);
         let drop_off = IVec2::new(7, 8);
         let patch = IVec2::new(1, 1);
-        let lit = generator_output(FULL_BURN_FUEL);
+        let lit = generator_output(FULL_BURN_FUEL, 0);
         assert_eq!(
             duty_target(Duty::WarmUp, lit, home, drop_off, Some(patch)),
             CENTER
@@ -1111,7 +1239,7 @@ mod tests {
         assert_eq!(
             duty_target(
                 Duty::Gather,
-                generator_output(FULL_BURN_FUEL),
+                generator_output(FULL_BURN_FUEL, 0),
                 home,
                 drop_off,
                 None
@@ -1120,7 +1248,7 @@ mod tests {
             "while the fire burns, idle citizens huddle around it"
         );
         assert_eq!(
-            duty_target(Duty::Gather, generator_output(0), home, drop_off, None),
+            duty_target(Duty::Gather, generator_output(0, 0), home, drop_off, None),
             home,
             "once it is out, the only shelter left is their own roof"
         );
@@ -1317,42 +1445,143 @@ mod tests {
     }
 
     #[test]
-    fn building_starts_only_when_the_beds_are_full_and_wood_is_spare() {
-        assert!(should_start_building(true, false));
-        assert!(
-            !should_start_building(true, true),
-            "no point building on empty beds"
-        );
-        assert!(!should_start_building(false, false), "no wood to spare");
+    fn every_building_costs_timber_and_can_be_told_apart() {
+        let mut glyphs = Vec::new();
+        for building in BUILDINGS {
+            let rules = building.rules();
+            assert!(rules.cost > 0, "{building:?} must cost something");
+            assert!(!rules.name.is_empty());
+            assert!(
+                !glyphs.contains(&rules.glyph),
+                "{building:?} reuses a glyph"
+            );
+            glyphs.push(rules.glyph);
+        }
+        assert_eq!(glyphs.len(), BUILDING_COUNT);
     }
 
     #[test]
-    fn logs_past_what_the_house_needs_go_on_the_fire() {
+    fn every_need_has_a_building_that_answers_it() {
+        let mut answers = Vec::new();
+        for kind in NEEDS {
+            let building = building_for(kind);
+            assert!(!answers.contains(&building), "{kind:?} shares a remedy");
+            answers.push(building);
+        }
+        assert_eq!(
+            answers.len(),
+            BUILDING_COUNT,
+            "every building is somebody's remedy"
+        );
+    }
+
+    #[test]
+    fn beds_come_first_when_there_are_none_to_be_had() {
+        let mut shares = [1.0; NEED_COUNT];
+        shares[NeedKind::Food as usize] = 0.0;
+        assert_eq!(
+            needed_building(shares, false),
+            Building::House,
+            "nothing else the colony builds will let it grow"
+        );
+    }
+
+    #[test]
+    fn with_beds_to_spare_the_worst_served_need_picks_the_project() {
+        for kind in NEEDS {
+            let mut shares = [1.0; NEED_COUNT];
+            shares[kind as usize] = 0.0;
+            assert_eq!(needed_building(shares, true), building_for(kind));
+        }
+    }
+
+    #[test]
+    fn an_evenly_served_colony_picks_the_first_listed_need() {
+        assert_eq!(
+            needed_building([0.5; NEED_COUNT], true),
+            building_for(NEEDS[0]),
+            "ties resolve in table order, not by chance"
+        );
+    }
+
+    #[test]
+    fn a_boiler_burns_hotter_and_reaches_further() {
+        let plain = generator_output(FULL_BURN_FUEL, 0);
+        let upgraded = generator_output(FULL_BURN_FUEL, 1);
+        assert!(upgraded > plain);
+        let reach = |output| {
+            (0..=R)
+                .filter(|d| heat_at(CENTER + IVec2::new(*d, 0), output) > 0.0)
+                .count()
+        };
+        assert!(
+            reach(upgraded) > reach(plain),
+            "a hotter fire warms more ground"
+        );
+        assert_eq!(
+            generator_output(0, 3),
+            0.0,
+            "boilers cannot burn what is not there"
+        );
+    }
+
+    #[test]
+    fn a_boiler_is_paid_for_in_fuel_forever() {
+        assert!(burn_amount(30, 1) > burn_amount(30, 0));
+        assert!(burn_amount(30, 2) > burn_amount(30, 1));
+    }
+
+    #[test]
+    fn each_hut_adds_to_what_a_haul_of_game_brings_back() {
+        assert_eq!(food_yield(0), 1);
+        assert!(food_yield(1) > food_yield(0));
+        assert!(food_yield(3) > food_yield(1));
+    }
+
+    #[test]
+    fn every_building_type_draws_on_the_same_run_of_plots() {
+        let first = plot_site(0).expect("plot 0 exists");
+        let second = plot_site(1).expect("plot 1 exists");
+        assert_eq!(
+            next_plot(&[first]),
+            Some(second),
+            "a hut occupies a plot a house could have had"
+        );
+    }
+
+    #[test]
+    fn logs_past_what_a_project_needs_go_on_the_fire() {
         let site = IVec2::new(5, 5);
-        assert!(log_goes_to_site(site, site, HOUSE_WOOD_COST - 1));
-        assert!(
-            !log_goes_to_site(site, site, HOUSE_WOOD_COST),
-            "a finished house must not swallow timber"
-        );
-        assert!(
-            !log_goes_to_site(CENTER, site, 0),
-            "wood headed for the fire stays there"
-        );
+        for building in BUILDINGS {
+            let cost = building.rules().cost;
+            assert!(log_goes_to_site(site, site, cost - 1, building));
+            assert!(
+                !log_goes_to_site(site, site, cost, building),
+                "a finished {building:?} must not swallow timber"
+            );
+            assert!(
+                !log_goes_to_site(CENTER, site, 0, building),
+                "wood headed for the fire stays there"
+            );
+        }
     }
 
     #[test]
     fn a_bigger_city_burns_more_fuel_but_the_fire_never_stalls() {
-        assert!(burn_amount(0) >= 1, "the generator always burns something");
-        assert!(burn_amount(100) > burn_amount(10));
         assert!(
-            burn_amount(10) <= burn_amount(11),
+            burn_amount(0, 0) >= 1,
+            "the generator always burns something"
+        );
+        assert!(burn_amount(100, 0) > burn_amount(10, 0));
+        assert!(
+            burn_amount(10, 0) <= burn_amount(11, 0),
             "burn must not drop as the city grows"
         );
     }
 
     #[test]
-    fn house_sites_are_distinct_and_fit_on_the_map() {
-        let sites = every_house_site();
+    fn plots_are_distinct_and_fit_on_the_map() {
+        let sites = every_plot();
         assert!(sites.len() >= 40, "the colony needs room to grow into");
         for (i, a) in sites.iter().enumerate() {
             assert!(a.x >= 0 && a.x <= R * 2 && a.y >= 0 && a.y <= R * 2);
@@ -1363,9 +1592,9 @@ mod tests {
     }
 
     #[test]
-    fn house_sites_never_cover_the_generator_or_a_harvest_patch() {
+    fn plots_never_cover_the_generator_or_a_harvest_patch() {
         let patches: Vec<IVec2> = patch_sites().into_iter().map(|patch| patch.pos).collect();
-        for site in every_house_site() {
+        for site in every_plot() {
             assert_ne!(site, CENTER);
             assert!(
                 !patches.contains(&site),
@@ -1387,21 +1616,18 @@ mod tests {
     }
 
     #[test]
-    fn house_sites_run_out_beyond_the_buildable_rings() {
+    fn plots_run_out_beyond_the_buildable_rings() {
         let last = (0..)
             .take(10_000)
-            .take_while(|i| house_site(*i).is_some())
+            .take_while(|i| plot_site(*i).is_some())
             .count();
         assert!(last > 0, "at least one site must be buildable");
-        assert!(
-            house_site(last).is_none(),
-            "sites must end, not wrap around"
-        );
+        assert!(plot_site(last).is_none(), "sites must end, not wrap around");
     }
 
     #[test]
     fn free_home_fills_each_house_to_capacity_before_the_next() {
-        let sites: Vec<IVec2> = (0..2).filter_map(house_site).collect();
+        let sites: Vec<IVec2> = (0..2).filter_map(plot_site).collect();
         let mut homes: Vec<IVec2> = Vec::new();
         for _ in 0..HOUSE_CAPACITY {
             let home = free_home(&sites, &homes).expect("first house has room");
@@ -1413,7 +1639,7 @@ mod tests {
 
     #[test]
     fn free_home_returns_none_when_every_bed_is_taken() {
-        let sites: Vec<IVec2> = (0..2).filter_map(house_site).collect();
+        let sites: Vec<IVec2> = (0..2).filter_map(plot_site).collect();
         let homes: Vec<IVec2> = sites
             .iter()
             .flat_map(|s| std::iter::repeat_n(*s, HOUSE_CAPACITY))
@@ -1423,22 +1649,18 @@ mod tests {
 
     #[test]
     fn the_next_building_plot_skips_the_houses_already_standing() {
-        let first = house_site(0).expect("site 0 exists");
-        let second = house_site(1).expect("site 1 exists");
-        assert_eq!(next_house_site(&[]), Some(first));
-        assert_eq!(next_house_site(&[first]), Some(second));
-        assert_eq!(
-            next_house_site(&[second]),
-            Some(first),
-            "gaps get filled first"
-        );
+        let first = plot_site(0).expect("site 0 exists");
+        let second = plot_site(1).expect("site 1 exists");
+        assert_eq!(next_plot(&[]), Some(first));
+        assert_eq!(next_plot(&[first]), Some(second));
+        assert_eq!(next_plot(&[second]), Some(first), "gaps get filled first");
     }
 
     #[test]
     fn the_next_building_plot_runs_out_once_the_rings_are_built_out() {
-        let all = every_house_site();
+        let all = every_plot();
         assert!(!all.is_empty());
-        assert_eq!(next_house_site(&all), None);
+        assert_eq!(next_plot(&all), None);
     }
 
     #[test]

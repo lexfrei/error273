@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 
 use crate::sim::{
-    CENTER, Calendar, Cargo, Citizen, Construction, HOUSE_WOOD_COST, House, NeedKind, Pos, R,
-    Stores, Tick,
+    BUILDINGS, Building, CENTER, Calendar, Cargo, Citizen, Construction, NeedKind, Pos, R, Stores,
+    Structure, Tick,
 };
 
 pub fn clear_screen() {
@@ -14,7 +14,7 @@ pub fn render(
     calendar: Res<Calendar>,
     stores: Stores,
     construction: Res<Construction>,
-    houses: Query<&Pos, With<House>>,
+    structures: Query<(&Pos, &Structure)>,
     citizens: Query<(&Pos, &Citizen)>,
 ) {
     let size = (R * 2 + 1) as usize;
@@ -30,8 +30,8 @@ pub fn render(
     for patch in &stores.patches.0 {
         grid[patch.pos.y as usize][patch.pos.x as usize] = patch_glyph(patch.kind, patch.amount);
     }
-    for pos in &houses {
-        grid[pos.0.y as usize][pos.0.x as usize] = 'H';
+    for (pos, structure) in &structures {
+        grid[pos.0.y as usize][pos.0.x as usize] = structure.0.rules().glyph;
     }
     if let Some(site) = &construction.site {
         grid[site.pos.y as usize][site.pos.x as usize] = '+';
@@ -56,9 +56,20 @@ pub fn render(
         out.push_str(&row.iter().collect::<String>());
         out.push('\n');
     }
-    let site = match &construction.site {
-        Some(site) => format!("{:2}/{}", site.delivered, HOUSE_WOOD_COST),
-        None => "  -  ".to_string(),
+    let standing_count = |building: Building| {
+        structures
+            .iter()
+            .filter(|(_, structure)| structure.0 == building)
+            .count()
+    };
+    let project = match &construction.site {
+        Some(site) => format!(
+            "{} {}/{}",
+            site.building.rules().name,
+            site.delivered,
+            site.building.rules().cost
+        ),
+        None => "none".to_string(),
     };
     out.push_str(&format!(
         "tick {:5}  year {}  {:<6}  day {:2}  hour {:02}\n",
@@ -69,15 +80,18 @@ pub fn render(
         calendar.hour
     ));
     out.push_str(&format!(
-        "pop {:3}  houses {:3}  build {}  fuel {:4}  food {:4}  wood {:4}  game {:4}\n",
+        "pop {:3}  fuel {:4}  food {:4}  wood {:4}  game {:4}\n",
         alive,
-        houses.iter().count(),
-        site,
         stores.generator.fuel,
         stores.granary.food,
         standing(Cargo::Wood),
         standing(Cargo::Food)
     ));
+    let counts: Vec<String> = BUILDINGS
+        .into_iter()
+        .map(|building| format!("{} {:3}", building.rules().name, standing_count(building)))
+        .collect();
+    out.push_str(&format!("{}  project {}\n", counts.join("  "), project));
     print!("{out}");
 
     if alive == 0 {

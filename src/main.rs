@@ -5,7 +5,7 @@ use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use std::time::Duration;
 
-use sim::{Calendar, Construction, Generator, Granary, Tick};
+use sim::{Built, Calendar, Construction, Generator, Granary, Tick};
 
 fn main() {
     App::new()
@@ -13,6 +13,7 @@ fn main() {
         .init_resource::<Tick>()
         .init_resource::<Calendar>()
         .init_resource::<Construction>()
+        .init_resource::<Built>()
         .insert_resource(Generator { fuel: 20 })
         .insert_resource(Granary { food: 60 })
         .add_systems(Startup, (render::clear_screen, sim::setup).chain())
@@ -21,6 +22,7 @@ fn main() {
             (
                 sim::advance_tick,
                 sim::advance_calendar,
+                sim::count_buildings,
                 sim::construction,
                 sim::citizen_ai,
                 sim::colony_growth,
