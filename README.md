@@ -94,7 +94,7 @@ cargo run
 
 That opens a window and draws the map on square cells, twelve and a half ticks a second, with the status lines under it. A terminal character box is about twice as tall as it is wide, which made a step sideways read as shorter than a step down; on square cells distances read true. Every cell is tinted by how warm it is, so the fire's reach is a thing you can watch shrink through autumn. It exits on its own once everyone is dead; Ctrl+C ends it early.
 
-`+` and `-` change how fast it runs while it runs, a rung at a time down a ladder from twenty milliseconds a tick to six hundred and forty, and `0` puts it back to eighty. The setting appears above the map when it is not the default. It moves the wall clock and nothing else: a tick is one game hour at every rung, ticks stay uniform at whatever length is current, and no rate in the simulation knows the keys exist. There is no pause -- stopping the clock is a different question, because it asks what the grid should do when it starts again.
+`+` and `-` change how fast it runs while it runs, a rung at a time down a ladder from twenty milliseconds a tick to six hundred and forty, and `0` puts it back to eighty. The setting appears at the end of the first status line when it is not the default. It moves the wall clock and nothing else: a tick is one game hour at every rung, ticks stay uniform at whatever length is current, and no rate in the simulation knows the keys exist. There is no pause -- stopping the clock is a different question, because it asks what the grid should do when it starts again.
 
 ### The headless instrument
 

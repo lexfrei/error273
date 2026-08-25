@@ -159,7 +159,10 @@ fn spawn_board(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
         TextFont::from_font_size(STATUS_SIZE).with_font(font.clone()),
         TextColor(INK_STATUS),
         Anchor::CENTER_RIGHT,
-        Transform::from_xyz(MAP_SPAN / 2.0, MAP_SPAN / 2.0 + STATUS_LEAD * 0.5, 1.0),
+        // The right end of the first status line. Above the map there is only
+        // the margin, which is a pixel shorter than the type it would have to
+        // hold, so the readout would have been drawn off the top of the window.
+        Transform::from_xyz(MAP_SPAN / 2.0, -MAP_SPAN / 2.0 - STATUS_LEAD * 0.5, 1.0),
     ));
     for line in 0..STATUS_LINES {
         commands.spawn((
