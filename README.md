@@ -160,6 +160,8 @@ Nothing acts on a mood yet. The ballot keeps its own two currencies -- what a ne
 
 The air outside the generator's reach follows the calendar: a cosine through the year, mildest in the middle of summer and harshest in the middle of winter, drifting a little each day rather than stepping at a season boundary. A colony gets one winter to learn on -- the first is scaled back and the cold reaches full depth by the third -- and the ramp is on the cold half only, so summers do not get worse with the years.
 
+A day has a shape of its own on top of that. The air swings six degrees between the small hours and the late afternoon, coldest before dawn, and a whole day averages out to exactly the season it sits in -- so the year is untouched and what is new is that when to go out is now a question with an answer. The swing is the same in a colony's first year as in its fortieth: the ramp above is about how hard a year is, and this is about the difference between noon and four in the morning.
+
 Treelines and hunting grounds grow back a little every day towards a cap of their own, in spring, summer and autumn. Nothing grows back in winter, which is what makes winter a thing to be survived rather than worked through: whatever is standing when it starts is the whole of what there is until spring. For the same reason the colony will not break ground on a project in winter, and will not break ground at all unless it holds half again what it wants per head behind the fire.
 
 ### The fire

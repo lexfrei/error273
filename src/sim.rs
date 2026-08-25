@@ -106,6 +106,13 @@ pub const CENTER: IVec2 = IVec2::new(R, R);
 // middle of summer and harshest in the middle of winter.
 pub const AMBIENT_MEAN: f32 = -26.0;
 pub const AMBIENT_SWING: f32 = 14.0;
+/// How far the air moves between the coldest hour of a day and the warmest.
+/// Small against the year's swing on purpose: a day is a decision about when to
+/// go out, and a season is a decision about whether to.
+pub const DIURNAL_SWING: f32 = 6.0;
+/// When the cold is worst. Before dawn rather than at midnight, which is where
+/// it falls outside a window as well.
+pub const COLDEST_HOUR: u64 = 5;
 // A colony gets one winter to learn on. The ramp is on the cold half only, so
 // summers are the same every year.
 pub const SEVERITY_FIRST: f32 = 0.55;
@@ -2071,10 +2078,11 @@ pub fn severity(year: u64) -> f32 {
     (SEVERITY_FIRST + ramp * (1.0 - SEVERITY_FIRST)).min(1.0)
 }
 
-/// The air outside the generator's reach on the day a tick falls in. A cosine
-/// through the year, so the drift from one day to the next is smooth and the
-/// extremes land mid-season rather than on a boundary.
-pub fn ambient_at(tick: u64) -> f32 {
+/// The climate on the day a tick falls in: a cosine through the year, so the
+/// drift from one day to the next is smooth and the extremes land mid-season
+/// rather than on a boundary. It is what a day is on average, and no hour of
+/// that day is actually at it.
+pub fn climate_at(tick: u64) -> f32 {
     let day = tick / ticks_per_day() % days_per_year();
     let year = tick / ticks_per_year() + 1;
     let midsummer = days_per_year() / 4 + days_per_year() / 8;
@@ -2086,6 +2094,26 @@ pub fn ambient_at(tick: u64) -> f32 {
         AMBIENT_SWING
     };
     AMBIENT_MEAN + swing * through_the_year
+}
+
+/// What the day does on top of the year: coldest in the small hours, warmest
+/// twelve hours later, and averaging over a whole day to exactly the climate it
+/// sits on, so the seasons are untouched by the days having a shape.
+///
+/// It does not scale with the severity ramp the winters do. The ramp is about
+/// how hard a year is; this is about the difference between noon and the small
+/// hours, which is the same difference in a colony's first year as in its
+/// fortieth.
+pub fn diurnal_at(tick: u64) -> f32 {
+    let hour = tick / TICKS_PER_HOUR % HOURS_PER_DAY;
+    let warmest = (COLDEST_HOUR + HOURS_PER_DAY / 2) % HOURS_PER_DAY;
+    let phase = (hour as f32 - warmest as f32) / HOURS_PER_DAY as f32 * std::f32::consts::TAU;
+    DIURNAL_SWING / 2.0 * phase.cos()
+}
+
+/// The air outside the generator's reach at the hour a tick falls on.
+pub fn ambient_at(tick: u64) -> f32 {
+    climate_at(tick) + diurnal_at(tick)
 }
 
 pub fn is_growing_season(season: Season) -> bool {
@@ -7822,5 +7850,82 @@ mod tests {
             assert!(!status.name().is_empty());
         }
         assert_eq!(seen.len(), 4, "four words, walked bottom to top, each once");
+    }
+
+    /// The air on one particular hour of one particular day.
+    fn air_on(day: u64, hour: u64) -> f32 {
+        ambient_at(day * ticks_per_day() + hour * TICKS_PER_HOUR)
+    }
+
+    #[test]
+    fn the_night_is_colder_than_the_day_all_year_round() {
+        for day in 0..days_per_year() {
+            let night = air_on(day, COLDEST_HOUR);
+            let noon = air_on(day, (COLDEST_HOUR + HOURS_PER_DAY / 2) % HOURS_PER_DAY);
+            assert!(
+                noon > night,
+                "day {day}: noon {noon} is not warmer than the small hours {night}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_coldest_and_warmest_hours_are_the_named_ones() {
+        let day = days_per_year() / 3;
+        let hours: Vec<f32> = (0..HOURS_PER_DAY).map(|hour| air_on(day, hour)).collect();
+        let coldest = hours
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(hour, _)| hour as u64)
+            .expect("a day has hours in it");
+        assert_eq!(coldest, COLDEST_HOUR);
+        let warmest = hours
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(hour, _)| hour as u64)
+            .expect("a day has hours in it");
+        assert_eq!(warmest, (COLDEST_HOUR + HOURS_PER_DAY / 2) % HOURS_PER_DAY);
+    }
+
+    #[test]
+    fn a_day_swings_by_exactly_what_it_is_said_to() {
+        let day = days_per_year() / 3;
+        let hours: Vec<f32> = (0..HOURS_PER_DAY).map(|hour| air_on(day, hour)).collect();
+        let low = hours.iter().copied().fold(f32::MAX, f32::min);
+        let high = hours.iter().copied().fold(f32::MIN, f32::max);
+        assert!(
+            (high - low - DIURNAL_SWING).abs() < 0.01,
+            "the day swung {} where it should swing {DIURNAL_SWING}",
+            high - low
+        );
+    }
+
+    #[test]
+    fn a_whole_day_averages_out_to_the_climate_it_sits_on() {
+        for day in [0, 17, days_per_year() / 2, days_per_year() - 1] {
+            let mean: f32 = (0..HOURS_PER_DAY)
+                .map(|hour| air_on(day, hour))
+                .sum::<f32>()
+                / HOURS_PER_DAY as f32;
+            assert!(
+                (mean - climate_at(day * ticks_per_day())).abs() < 0.01,
+                "day {day} averaged {mean}, which is not the climate under it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_climate_underneath_is_the_curve_it_always_was() {
+        // The year's shape is out of scope for the hour that rides on it: this
+        // pins that nothing about the seasons moved when the days got a shape.
+        let midwinter = day_of(
+            SEVERITY_FULL_YEAR,
+            DAYS_PER_SEASON * 3 + DAYS_PER_SEASON / 2,
+        );
+        let midsummer = day_of(SEVERITY_FULL_YEAR, DAYS_PER_SEASON + DAYS_PER_SEASON / 2);
+        assert!(climate_at(midwinter) < AMBIENT_MEAN);
+        assert!(climate_at(midsummer) > AMBIENT_MEAN);
     }
 }
