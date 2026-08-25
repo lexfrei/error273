@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::sim::{CENTER, Citizen, Forest, Generator, Pos, R, Tick};
+use crate::sim::{CENTER, Citizen, Forest, Generator, House, Pos, R, Tick};
 
 pub fn clear_screen() {
     print!("\x1B[2J");
@@ -10,6 +10,7 @@ pub fn render(
     tick: Res<Tick>,
     generator: Res<Generator>,
     forest: Res<Forest>,
+    houses: Query<&Pos, With<House>>,
     citizens: Query<(&Pos, &Citizen)>,
 ) {
     let size = (R * 2 + 1) as usize;
@@ -25,8 +26,11 @@ pub fn render(
     for (cell, wood) in &forest.0 {
         grid[cell.y as usize][cell.x as usize] = if *wood > 0 { 'T' } else { 't' };
     }
+    for pos in &houses {
+        grid[pos.0.y as usize][pos.0.x as usize] = 'H';
+    }
     for (pos, citizen) in &citizens {
-        grid[pos.0.y as usize][pos.0.x as usize] = if citizen.carrying { 'W' } else { '@' };
+        grid[pos.0.y as usize][pos.0.x as usize] = citizen_glyph(citizen, pos.0);
     }
     grid[CENTER.y as usize][CENTER.x as usize] = '#';
 
@@ -38,13 +42,27 @@ pub fn render(
         out.push('\n');
     }
     out.push_str(&format!(
-        "tick {:5}  citizens {:2}  fuel {:3}  forest {:3}\n",
-        tick.0, alive, generator.fuel, wood_left
+        "tick {:5}  pop {:3}  houses {:3}  fuel {:4}  forest {:4}\n",
+        tick.0,
+        alive,
+        houses.iter().count(),
+        generator.fuel,
+        wood_left
     ));
     print!("{out}");
 
     if alive == 0 {
         println!("Everyone froze. The city is silent.");
         std::process::exit(0);
+    }
+}
+
+fn citizen_glyph(citizen: &Citizen, pos: IVec2) -> char {
+    if citizen.carrying {
+        'W'
+    } else if citizen.resting && pos == citizen.home {
+        'z'
+    } else {
+        '@'
     }
 }
