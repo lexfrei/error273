@@ -1046,7 +1046,7 @@ impl Needs {
 
     /// What the walk back to the fire has cost, in the same currency as a need:
     /// one tick of it weighs what one tick at the point of acting on a need
-    /// weighs, so the four entries on the ballot compare directly.
+    /// weighs, so every entry on the ballot compares directly.
     pub fn detour_burden(&self) -> f32 {
         self.detour as f32
     }
