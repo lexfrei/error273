@@ -7200,4 +7200,30 @@ mod tests {
         );
         assert_eq!(Missing::default().nearest_to(CENTER), None);
     }
+
+    #[test]
+    fn a_claimed_hauler_takes_their_load_to_the_shed_and_not_the_hearth() {
+        let post = CENTER + IVec2::new(40, 0);
+        assert_eq!(
+            delivery_target(Cargo::Wood, true, None, Some(post)),
+            post,
+            "a shed that claimed somebody gets what they were carrying"
+        );
+        assert_eq!(
+            delivery_target(Cargo::Wood, false, None, Some(post)),
+            CENTER,
+            "a colony with nothing to spare keeps its wood for the fire"
+        );
+        assert_eq!(
+            delivery_target(Cargo::Food, true, None, Some(post)),
+            CENTER,
+            "a shed burns wood and not game"
+        );
+        let site = CENTER + IVec2::new(2, 0);
+        assert_eq!(
+            delivery_target(Cargo::Wood, true, Some(site), Some(post)),
+            site,
+            "and a project under way comes before a shed"
+        );
+    }
 }
