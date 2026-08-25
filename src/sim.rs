@@ -247,6 +247,11 @@ pub const WORKER_DAYS_TO_KNOW: f32 = 60.0;
 /// How far a childhood alone is allowed to move the guess. A band, never a
 /// measurement -- the colony watched the warmth and the food, not the citizen.
 pub const PRIOR_STRENGTH: f32 = 0.35;
+/// How many days a store may go short before the colony stops respecting
+/// trades over it. Banished shipped exactly this valve after its own players
+/// found the alternative: a job nobody has taken for long enough stops being
+/// somebody's job and becomes anybody's.
+pub const POSTING_STALE_AFTER: f32 = 20.0;
 // How much more than it spends a colony must be able to fetch before it takes
 // on another mouth. The rate it is judged on is a season's average, and the
 // season that binds is the one that puts nothing back, so this margin is the
@@ -364,6 +369,37 @@ pub fn estimate(raised: f32, prosperity: f32, worker_days: f32) -> f32 {
     let watched = (worker_days / WORKER_DAYS_TO_KNOW).clamp(0.0, 1.0);
     let guessed = FORMATION_NEUTRAL + (prosperity - FORMATION_NEUTRAL) * PRIOR_STRENGTH;
     guessed * (1.0 - watched) + raised * watched
+}
+
+/// How long each store has stood short. A colony that respects trades over a
+/// store nobody is filling has made its first guess at a workforce permanent.
+#[derive(Resource, Default)]
+pub struct Postings {
+    short_for: [f32; CARGO_COUNT],
+}
+
+impl Postings {
+    pub fn note(&mut self, cargo: Cargo, short: bool) {
+        self.short_for[cargo as usize] = if short {
+            self.short_for[cargo as usize] + 1.0
+        } else {
+            0.0
+        };
+    }
+
+    pub fn days_short(&self, cargo: Cargo) -> f32 {
+        self.short_for[cargo as usize]
+    }
+}
+
+pub fn posting_is_stale(days_short: f32) -> bool {
+    days_short >= POSTING_STALE_AFTER
+}
+
+/// Who may be taken for a vacancy. The spare hands always; once a posting has
+/// gone stale, anybody who is not already doing that work.
+pub fn may_be_taken(trade: Trade, wanted: Trade, stale: bool) -> bool {
+    trade == Trade::Laborer || (stale && trade != wanted)
 }
 
 /// What a citizen does with their days. The labourer pool is a trade like any
@@ -1918,11 +1954,20 @@ pub fn record_trend(
     citizens: Query<&Citizen>,
     mut trend: ResMut<Trend>,
     mut flow: ResMut<Flow>,
+    mut postings: ResMut<Postings>,
 ) {
     if !tick.0.is_multiple_of(ticks_per_day()) {
         return;
     }
     let population = citizens.iter().count();
+    postings.note(
+        Cargo::Wood,
+        stock_share(stores.generator.fuel, FUEL_PER_CITIZEN, population) < 1.0,
+    );
+    postings.note(
+        Cargo::Food,
+        stock_share(stores.granary.food, FOOD_PER_CITIZEN, population) < 1.0,
+    );
     trend.record([
         stock_share(stores.generator.fuel, FUEL_PER_CITIZEN, population),
         stock_share(stores.granary.food, FOOD_PER_CITIZEN, population),
@@ -1945,6 +1990,7 @@ pub fn count_buildings(mut built: ResMut<Built>, structures: Query<&Structure>) 
 pub fn assign_trades(
     tick: Res<Tick>,
     stores: Stores,
+    postings: Res<Postings>,
     mayor: Res<Mayor>,
     mut citizens: Query<(Entity, &Pos, &mut Citizen)>,
 ) {
@@ -1955,17 +2001,6 @@ pub fn assign_trades(
         .iter()
         .filter(|(_, _, citizen)| is_adult(citizen.age))
         .count();
-    let mut spare: Vec<(Entity, IVec2, f32)> = Vec::new();
-    for (entity, pos, citizen) in &citizens {
-        if is_adult(citizen.age) && citizen.trade == Trade::Laborer {
-            spare.push((entity, pos.0, citizen.experience[Trade::Laborer as usize]));
-        }
-    }
-    let vacancies = spare.len().saturating_sub(laborers_wanted(hands));
-    if vacancies == 0 {
-        return;
-    }
-
     let short = if stock_share(stores.granary.food, FOOD_PER_CITIZEN, hands)
         < stock_share(stores.generator.fuel, FUEL_PER_CITIZEN, hands)
     {
@@ -1974,6 +2009,32 @@ pub fn assign_trades(
         Cargo::Wood
     };
     let trade = trade_for(short);
+    let stale = posting_is_stale(postings.days_short(short));
+
+    let mut laborers = 0usize;
+    let mut spare: Vec<(Entity, IVec2, f32)> = Vec::new();
+    for (entity, pos, citizen) in &citizens {
+        if !is_adult(citizen.age) {
+            continue;
+        }
+        if citizen.trade == Trade::Laborer {
+            laborers += 1;
+        }
+        if may_be_taken(citizen.trade, trade, stale) {
+            spare.push((entity, pos.0, citizen.experience[trade as usize]));
+        }
+    }
+    // Spare hands are what the colony holds back; a stale posting is allowed to
+    // eat into a trade instead, which is the only way a first guess at a
+    // workforce ever gets corrected.
+    let vacancies = if stale {
+        spare.len().min(1)
+    } else {
+        laborers.saturating_sub(laborers_wanted(hands))
+    };
+    if vacancies == 0 {
+        return;
+    }
     let bias = mayor.trade_bias[trade as usize];
 
     for filled in 0..vacancies {
@@ -4928,5 +4989,53 @@ mod tests {
         assert!(!is_known(0.0));
         assert!(!is_known(WORKER_DAYS_TO_KNOW - 1.0));
         assert!(is_known(WORKER_DAYS_TO_KNOW));
+    }
+
+    #[test]
+    fn a_posting_goes_stale_only_after_it_has_stood_a_while() {
+        assert!(!posting_is_stale(0.0));
+        assert!(!posting_is_stale(POSTING_STALE_AFTER - 1.0));
+        assert!(posting_is_stale(POSTING_STALE_AFTER));
+    }
+
+    #[test]
+    fn a_posting_ages_while_the_store_is_short_and_is_torn_down_when_it_is_not() {
+        let mut postings = Postings::default();
+        for _ in 0..10 {
+            postings.note(Cargo::Wood, true);
+        }
+        assert_eq!(postings.days_short(Cargo::Wood), 10.0);
+        assert_eq!(
+            postings.days_short(Cargo::Food),
+            0.0,
+            "one store going short says nothing about the other"
+        );
+        postings.note(Cargo::Wood, false);
+        assert_eq!(
+            postings.days_short(Cargo::Wood),
+            0.0,
+            "a store that is filled again has no posting standing"
+        );
+    }
+
+    #[test]
+    fn a_fresh_posting_is_the_labourers_and_a_stale_one_is_anybodys() {
+        let wanted = Trade::Woodcutter;
+        assert!(
+            may_be_taken(Trade::Laborer, wanted, false),
+            "spare hands always"
+        );
+        assert!(
+            !may_be_taken(Trade::Hunter, wanted, false),
+            "while the posting is fresh, nobody leaves a trade for it"
+        );
+        assert!(
+            may_be_taken(Trade::Hunter, wanted, true),
+            "a job nobody has taken for long enough stops being somebody's job"
+        );
+        assert!(
+            !may_be_taken(wanted, wanted, true),
+            "and the people already doing it are not the answer to it"
+        );
     }
 }
