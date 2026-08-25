@@ -91,7 +91,7 @@ How long a tick lasts in real time, in milliseconds, default 80 and held inside 
 cargo test
 ```
 
-Everything the simulation decides is a pure function with a test on it, so the suite runs headless and in a moment. Building without the window drops the window's dependencies and runs a handful of tests the windowed build has nothing to check.
+The simulation's decisions are pushed into pure functions so they can be checked without running a colony, which is why the suite finishes in a moment. Building without the window drops the window's dependencies and runs a handful of tests the windowed build has nothing to check.
 
 ## What the simulation does
 
