@@ -233,6 +233,17 @@ pub const INHERITED_SHARE: f32 = 0.4;
 /// One founder in this many takes to hunting. The fire is most of what a colony
 /// spends, so most of the founding party goes to the treelines.
 pub const HUNTERS_ONE_IN: usize = 4;
+
+// What the colony says about a citizen. Never a number: one word per stat,
+// bucketed against the colony's own middle, so the same person is described
+// differently in a different colony.
+pub const REGARD_STEP: f32 = 0.08;
+/// Days of watched work before the colony trusts what it has seen over what it
+/// remembers of the upbringing.
+pub const WORKER_DAYS_TO_KNOW: f32 = 60.0;
+/// How far a childhood alone is allowed to move the guess. A band, never a
+/// measurement -- the colony watched the warmth and the food, not the citizen.
+pub const PRIOR_STRENGTH: f32 = 0.35;
 // How much more than it spends a colony must be able to fetch before it takes
 // on another mouth. The rate it is judged on is a season's average, and the
 // season that binds is the one that puts nothing back, so this margin is the
@@ -297,6 +308,60 @@ pub const HAUL_SWITCH_MAX: f32 = 0.35;
 // Every block of citizens the generator has to warm costs another log per cycle,
 // so growth is paid for twice: once in timber, then forever in fuel.
 pub const POP_PER_EXTRA_BURN: usize = 20;
+
+/// How the colony describes one stat of one citizen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Regard {
+    Poor,
+    Below,
+    Middling,
+    Above,
+    Strong,
+}
+
+impl Regard {
+    pub fn word(self) -> &'static str {
+        match self {
+            Regard::Poor => "poor",
+            Regard::Below => "weak",
+            Regard::Middling => "fair",
+            Regard::Above => "good",
+            Regard::Strong => "strong",
+        }
+    }
+}
+
+/// Which band a value falls in, measured against the middle of this colony
+/// rather than against any fixed scale.
+pub fn regard_of(value: f32, median: f32) -> Regard {
+    let apart = value - median;
+    if apart <= -2.0 * REGARD_STEP {
+        Regard::Poor
+    } else if apart <= -REGARD_STEP {
+        Regard::Below
+    } else if apart < REGARD_STEP {
+        Regard::Middling
+    } else if apart < 2.0 * REGARD_STEP {
+        Regard::Above
+    } else {
+        Regard::Strong
+    }
+}
+
+/// Whether the colony has watched somebody work long enough to trust what it
+/// has seen over what it remembers of how they were raised.
+pub fn is_known(worker_days: f32) -> bool {
+    worker_days >= WORKER_DAYS_TO_KNOW
+}
+
+/// The colony's running estimate of a citizen: at first the band the childhood
+/// it watched suggests, then the work it has actually seen, and a blend in
+/// between. It starts wrong on purpose and converges.
+pub fn estimate(raised: f32, prosperity: f32, worker_days: f32) -> f32 {
+    let watched = (worker_days / WORKER_DAYS_TO_KNOW).clamp(0.0, 1.0);
+    let guessed = FORMATION_NEUTRAL + (prosperity - FORMATION_NEUTRAL) * PRIOR_STRENGTH;
+    guessed * (1.0 - watched) + raised * watched
+}
 
 /// What a citizen does with their days. The labourer pool is a trade like any
 /// other and is what makes the others fillable.
@@ -973,6 +1038,9 @@ pub struct Citizen {
     pub upbringing: Upbringing,
     /// How far their body has learned the cold, which the cold takes back.
     pub acclimated: f32,
+    /// Days of work the colony has actually watched them do, which is what its
+    /// opinion of them is worth.
+    pub watched: f32,
     /// What they do with their days, and what they have practised at.
     pub trade: Trade,
     pub experience: [f32; TRADE_COUNT],
@@ -1699,6 +1767,7 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
                 needs: Needs::founder(i, CITIZENS),
                 upbringing: Upbringing::grown(seed),
                 acclimated: 0.0,
+                watched: 0.0,
                 trade: founding_trade(i),
                 experience: [0.0; TRADE_COUNT],
                 age: founder_age(i, CITIZENS),
@@ -2047,6 +2116,7 @@ pub fn colony_growth(
                 needs: Needs::newcomer(),
                 upbringing: Upbringing::born(seed),
                 acclimated: 0.0,
+                watched: 0.0,
                 // A child is nobody's tradesman until they are grown.
                 trade: Trade::Laborer,
                 experience: [0.0; TRADE_COUNT],
@@ -2205,6 +2275,9 @@ pub fn citizen_ai(
             citizen.needs.spend(duty == Duty::WarmUp);
             // A trade is kept up by working it and goes to rust otherwise.
             let at_work = matches!(duty, Duty::Gather | Duty::Deliver);
+            if at_work {
+                citizen.watched += per_day(1.0);
+            }
             for trade in TRADES {
                 let practising = at_work && trade == citizen.trade;
                 citizen.experience[trade as usize] =
@@ -4693,5 +4766,111 @@ mod tests {
                 "somebody has to fetch {trade:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_word_is_measured_against_the_colony_and_not_a_constant() {
+        let middle = 0.5;
+        assert_eq!(regard_of(middle, middle), Regard::Middling);
+        assert_eq!(
+            regard_of(middle, 0.2),
+            Regard::Strong,
+            "strong in a weak colony"
+        );
+        assert_eq!(
+            regard_of(middle, 0.8),
+            Regard::Poor,
+            "and poor in a strong one"
+        );
+    }
+
+    #[test]
+    fn the_bands_run_in_order() {
+        let middle = 0.5;
+        let ladder = [
+            regard_of(0.0, middle),
+            regard_of(middle - REGARD_STEP, middle),
+            regard_of(middle, middle),
+            regard_of(middle + REGARD_STEP, middle),
+            regard_of(1.0, middle),
+        ];
+        for pair in ladder.windows(2) {
+            assert!(
+                pair[0] as usize <= pair[1] as usize,
+                "the ladder is out of order"
+            );
+        }
+        assert_eq!(ladder[0], Regard::Poor);
+        assert_eq!(ladder[4], Regard::Strong);
+    }
+
+    #[test]
+    fn every_band_has_a_word_and_no_two_share_one() {
+        let mut said = Vec::new();
+        for band in [
+            Regard::Poor,
+            Regard::Below,
+            Regard::Middling,
+            Regard::Above,
+            Regard::Strong,
+        ] {
+            let word = band.word();
+            assert!(!word.is_empty());
+            assert!(
+                !said.contains(&word),
+                "{band:?} says what another band says"
+            );
+            said.push(word);
+        }
+    }
+
+    #[test]
+    fn the_colony_guesses_from_the_childhood_it_watched_before_it_has_watched_the_work() {
+        let truth = STAT_MAX;
+        let fat = estimate(truth, 1.0, 0.0);
+        let lean = estimate(truth, 0.0, 0.0);
+        assert!(
+            fat > lean,
+            "a child of a fat decade starts described higher"
+        );
+        assert_ne!(fat, truth, "but the colony is not claiming to know");
+    }
+
+    #[test]
+    fn the_estimate_converges_on_what_a_citizen_actually_is() {
+        let truth = STAT_MAX;
+        let green = estimate(truth, 0.0, 0.0);
+        let half = estimate(truth, 0.0, WORKER_DAYS_TO_KNOW / 2.0);
+        let known = estimate(truth, 0.0, WORKER_DAYS_TO_KNOW);
+        assert!(
+            (green - truth).abs() > (half - truth).abs(),
+            "watching has to move the estimate"
+        );
+        assert!((half - truth).abs() > (known - truth).abs());
+        assert_eq!(known, truth, "and land on it");
+        assert_eq!(
+            estimate(truth, 0.0, WORKER_DAYS_TO_KNOW * 10.0),
+            truth,
+            "and stay there"
+        );
+    }
+
+    #[test]
+    fn a_prior_starts_a_citizen_in_a_band_and_never_at_a_value() {
+        for prosperity in [0.0, 0.5, 1.0] {
+            let guessed = estimate(STAT_MAX, prosperity, 0.0);
+            assert!(
+                (guessed - STAT_MAX).abs() > 1e-3,
+                "a childhood is a band, not a measurement"
+            );
+            assert!((0.0..=1.0).contains(&guessed));
+        }
+    }
+
+    #[test]
+    fn the_colony_knows_a_citizen_once_it_has_watched_them_work() {
+        assert!(!is_known(0.0));
+        assert!(!is_known(WORKER_DAYS_TO_KNOW - 1.0));
+        assert!(is_known(WORKER_DAYS_TO_KNOW));
     }
 }

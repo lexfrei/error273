@@ -1,9 +1,9 @@
 use crate::sim::{
-    ADULT_AGE, BUILDING_COUNT, BUILDINGS, Building, Calendar, FRAILTY_ONSET, STAT_COUNT, STATS,
-    couples, is_adult,
+    ADULT_AGE, BUILDING_COUNT, BUILDINGS, Building, Calendar, FRAILTY_ONSET, Regard, STAT_COUNT,
+    STATS, couples, is_adult,
 };
 
-pub const STATUS_LINES: usize = 4;
+pub const STATUS_LINES: usize = 5;
 
 /// Everything the status lines report. Both faces of the game fill one of these
 /// before formatting, so a reading that exists in one and not the other is a
@@ -25,9 +25,21 @@ pub struct Status {
     /// The middle of the colony for each stat. An aggregate, not a reveal: what
     /// any one citizen is stays hidden until the colony has watched them work.
     pub stats: [f32; STAT_COUNT],
+    /// One citizen, described the way the colony would describe them.
+    pub card: Option<CitizenCard>,
 }
 
-/// The four lines under the map, and the whole of what the headless build
+/// What the colony would say about one of its own. Words rather than numbers,
+/// and the colony says plainly whether it is guessing.
+pub struct CitizenCard {
+    pub seed: u64,
+    pub age: f32,
+    pub words: [Regard; STAT_COUNT],
+    pub watched: f32,
+    pub known: bool,
+}
+
+/// The five lines under the map, and the whole of what the headless build
 /// prints. Parsed by the balance log, so the shape of these is an interface.
 pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
     let project = match status.project {
@@ -93,5 +105,32 @@ pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
                 .collect::<Vec<String>>()
                 .join("/")
         ),
+        match &status.card {
+            Some(card) => format!(
+                "eldest #{:<3} {:2.0}y  {}  watched {:3.0}d {}",
+                card.seed,
+                card.age,
+                STATS
+                    .into_iter()
+                    .map(|stat| format!(
+                        "{} {:<6}",
+                        stat_word(stat),
+                        card.words[stat as usize].word()
+                    ))
+                    .collect::<Vec<String>>()
+                    .join(" "),
+                card.watched,
+                if card.known { "" } else { "(a guess)" }
+            ),
+            None => "eldest --".to_string(),
+        },
     ]
+}
+
+fn stat_word(stat: crate::sim::Stat) -> &'static str {
+    match stat {
+        crate::sim::Stat::Strength => "str",
+        crate::sim::Stat::Wits => "wit",
+        crate::sim::Stat::Hardiness => "hard",
+    }
 }

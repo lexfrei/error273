@@ -67,7 +67,7 @@ The map below is the window's glyph set; the four lines under it are exactly wha
 | `z` | a citizen asleep at home |
 | `.` | open ground |
 
-Four lines sit under the map. The first is the tick counter, the date it works out to, and the air outside the fire's reach. The second is the living population and the four quantities that decide the run: fuel in the generator, food in the granary, wood still standing, game still standing. The third counts what has been built, names the project in progress with how much timber it has swallowed so far, and gives the last ballot as votes for house, hut and boiler in that order. The fourth is the age pyramid -- children, grown citizens, the frail -- how many couples the colony has, and the middle of the colony for each of the three stats. That last is an aggregate and not a reveal: what any one citizen is stays hidden.
+Five lines sit under the map. The first is the tick counter, the date it works out to, and the air outside the fire's reach. The second is the living population and the four quantities that decide the run: fuel in the generator, food in the granary, wood still standing, game still standing. The third counts what has been built, names the project in progress with how much timber it has swallowed so far, and gives the last ballot as votes for house, hut and boiler in that order. The fourth is the age pyramid -- children, grown citizens, the frail -- how many couples the colony has, and the middle of the colony for each of the three stats. That last is an aggregate and not a reveal: what any one citizen is stays hidden.
 
 ## Running it
 
@@ -181,6 +181,12 @@ Every grown citizen has a trade -- the treelines, the hunting grounds, or none, 
 Practice is kept up by doing the work and rusts when it stops, so churning people between trades costs something. A child takes the trade of the oldest grown citizen in their house on the day they are grown, with a fraction of that person's practice already in hand -- which is how a trade can quietly die out with a household.
 
 What a citizen brings to the work is what the colony raised in them, multiplied by how well they fit the trade, and one day multiplied by how well they are holding up. That last is wired in and set to one until there is a mood to put in it.
+
+### What the colony thinks of somebody
+
+None of those three numbers is ever printed. What the colony prints is one word per stat, and the word is measured against the middle of this colony rather than any fixed scale, so the same person is described differently in a different colony. It is also explicitly an opinion. Before the colony has watched somebody work, the word is a guess drawn from the childhood it did watch -- a child of a fat decade starts described better than they may turn out to be, which is a better kind of wrong than starting from nothing -- and the guess is marked as one. As the days of watched work add up the description converges on what the citizen actually is, and stops being marked.
+
+The fifth line under the map is one such card, for the oldest citizen in the colony.
 
 ### Growing
 

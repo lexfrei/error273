@@ -13,9 +13,10 @@ use bevy::window::WindowResolution;
 
 use crate::sim::{
     Air, BUILDINGS, Ballot, Building, CENTER, Cargo, Citizen, Construction, GENERATOR_HEAT,
-    NeedKind, Outside, Pos, R, STAT_COUNT, STATS, Stores, Structure, median,
+    NeedKind, Outside, Pos, R, Regard, STAT_COUNT, STATS, Stores, Structure, estimate, is_known,
+    median, regard_of,
 };
-use crate::status::{STATUS_LINES, Status, status_lines};
+use crate::status::{CitizenCard, STATUS_LINES, Status, status_lines};
 
 /// Compiled in rather than loaded from `assets/`, so the binary draws the same
 /// map wherever it is run from.
@@ -237,6 +238,27 @@ fn paint_status(
             .collect();
         stats[stat as usize] = median(&mut held);
     }
+    let card = citizens
+        .iter()
+        .max_by(|a, b| a.age.total_cmp(&b.age))
+        .map(|citizen| {
+            let mut words = [Regard::Middling; STAT_COUNT];
+            for stat in STATS {
+                let guess = estimate(
+                    citizen.upbringing.stats().of(stat),
+                    citizen.upbringing.prosperity(),
+                    citizen.watched,
+                );
+                words[stat as usize] = regard_of(guess, stats[stat as usize]);
+            }
+            CitizenCard {
+                seed: citizen.seed,
+                age: citizen.age,
+                words,
+                watched: citizen.watched,
+                known: is_known(citizen.watched),
+            }
+        });
     let status = Status {
         tick: outside.tick.0,
         calendar: *outside.calendar,
@@ -254,6 +276,7 @@ fn paint_status(
         tally: ballot.tally,
         ages,
         stats,
+        card,
     };
     let painted = status_lines(&status);
     for (line, mut text) in &mut lines {
