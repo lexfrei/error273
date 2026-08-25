@@ -211,6 +211,9 @@ pub const FIT_CEILING: f32 = 1.8;
 /// Hard-wired until the mood layer fills it. The shape is here so that layer
 /// has somewhere to land without touching anything that reads a stat.
 pub const FOCUS_UNTIL_MOOD_EXISTS: f32 = 1.0;
+/// What anybody brings back, before what they are is counted. Set so a green
+/// founder averages about the one unit every citizen used to carry.
+pub const HAUL_BASE: f32 = 0.6;
 pub const HAUL_LOAD_SWING: f32 = 1.0;
 // Distance is the Chebyshev norm, which is the true travel time under
 // one-cell-per-tick king moves, and is deliberately the wrong distance for
@@ -412,10 +415,15 @@ pub fn effective_stat(base: f32, focus_mult: f32, trade_fit_mult: f32) -> f32 {
     base * focus_mult * trade_fit_mult
 }
 
-/// What one trip brings home. This is the only place anything the colony raised
-/// turns into capacity rather than merely into survival.
-pub fn haul_load(effective: f32) -> u32 {
-    1 + (effective.max(0.0) * HAUL_LOAD_SWING) as u32
+/// What one trip brings home, and what is left banked toward the next. A slope
+/// rather than a step: the fraction is carried forward rather than rolled for,
+/// so a small difference in what the colony raised is a small difference in
+/// what comes back, and the run still replays exactly. This is the only place
+/// anything the colony raised turns into capacity rather than survival.
+pub fn haul_load(effective: f32, banked: f32) -> (u32, f32) {
+    let earned = banked + HAUL_BASE + effective.max(0.0) * HAUL_LOAD_SWING;
+    let whole = earned.floor().max(0.0);
+    (whole as u32, earned - whole)
 }
 
 /// How good a candidate a citizen is for a vacancy.
@@ -1041,6 +1049,9 @@ pub struct Citizen {
     /// Days of work the colony has actually watched them do, which is what its
     /// opinion of them is worth.
     pub watched: f32,
+    /// The part of a load they were owed and could not carry, kept for the next
+    /// trip so nothing is lost to rounding.
+    pub banked: f32,
     /// What they do with their days, and what they have practised at.
     pub trade: Trade,
     pub experience: [f32; TRADE_COUNT],
@@ -1768,6 +1779,7 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
                 upbringing: Upbringing::grown(seed),
                 acclimated: 0.0,
                 watched: 0.0,
+                banked: 0.0,
                 trade: founding_trade(i),
                 experience: [0.0; TRADE_COUNT],
                 age: founder_age(i, CITIZENS),
@@ -2117,6 +2129,7 @@ pub fn colony_growth(
                 upbringing: Upbringing::born(seed),
                 acclimated: 0.0,
                 watched: 0.0,
+                banked: 0.0,
                 // A child is nobody's tradesman until they are grown.
                 trade: Trade::Laborer,
                 experience: [0.0; TRADE_COUNT],
@@ -2216,7 +2229,11 @@ pub fn citizen_ai(
                 // raised in them turns into capacity rather than survival.
                 let raised = citizen.upbringing.stats().of(trade_stat(citizen.trade));
                 let fit = trade_fit(raised, citizen.experience[citizen.trade as usize]);
-                let load = haul_load(effective_stat(raised, FOCUS_UNTIL_MOOD_EXISTS, fit));
+                let (load, banked) = haul_load(
+                    effective_stat(raised, FOCUS_UNTIL_MOOD_EXISTS, fit),
+                    citizen.banked,
+                );
+                citizen.banked = banked;
                 let yield_each = match cargo {
                     Cargo::Wood => 1,
                     Cargo::Food => food_yield(built.of(Building::HuntersHut)),
@@ -4650,10 +4667,49 @@ mod tests {
         assert!(effective_stat(base, FOCUS_UNTIL_MOOD_EXISTS, 1.5) > base);
     }
 
+    /// What a citizen averages over many trips, which is what the colony feels.
+    fn carried_per_trip(effective: f32) -> f32 {
+        let trips = 2000;
+        let mut banked = 0.0;
+        let mut total = 0u32;
+        for _ in 0..trips {
+            let (load, left) = haul_load(effective, banked);
+            total += load;
+            banked = left;
+        }
+        total as f32 / trips as f32
+    }
+
     #[test]
-    fn a_stronger_practised_hauler_carries_more_home() {
-        assert_eq!(haul_load(0.0), 1, "everybody brings something back");
-        assert!(haul_load(FIT_CEILING) > haul_load(0.5));
+    fn what_a_citizen_carries_home_rises_with_no_step_in_it() {
+        let mut previous = 0.0;
+        for notch in 0..=36 {
+            let effective = notch as f32 * 0.05;
+            let carried = carried_per_trip(effective);
+            assert!(
+                carried > previous,
+                "a step at effective {effective}: {carried} is no better than {previous}"
+            );
+            previous = carried;
+        }
+    }
+
+    #[test]
+    fn a_hauler_who_is_owed_a_fraction_is_paid_it_eventually() {
+        let effective = 0.42;
+        let expected = HAUL_BASE + effective * HAUL_LOAD_SWING;
+        let carried = carried_per_trip(effective);
+        assert!(
+            (carried - expected).abs() < 0.01,
+            "the banked fraction has to come back: {carried} against {expected}"
+        );
+    }
+
+    #[test]
+    fn nobody_ever_comes_home_owing_the_colony() {
+        let (load, banked) = haul_load(-5.0, 0.0);
+        assert_eq!(load, 0, "a load is never negative");
+        assert!((0.0..1.0).contains(&banked));
     }
 
     #[test]

@@ -180,7 +180,7 @@ Every grown citizen has a trade -- the treelines, the hunting grounds, or none, 
 
 Practice is kept up by doing the work and rusts when it stops, so churning people between trades costs something. A child takes the trade of the oldest grown citizen in their house on the day they are grown, with a fraction of that person's practice already in hand -- which is how a trade can quietly die out with a household.
 
-What a citizen brings to the work is what the colony raised in them, multiplied by how well they fit the trade, and one day multiplied by how well they are holding up. That last is wired in and set to one until there is a mood to put in it.
+What a citizen brings to the work is what the colony raised in them, multiplied by how well they fit the trade, and one day multiplied by how well they are holding up. That last is wired in and set to one until there is a mood to put in it. It decides what a trip brings home, and it is the only place any of this turns into capacity rather than just into who survives a winter. The part of a load somebody is owed but cannot carry is kept for their next trip rather than rounded away, so a small difference in what the colony raised is a small difference in what comes back.
 
 ### What the colony thinks of somebody
 
