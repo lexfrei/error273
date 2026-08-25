@@ -3,6 +3,11 @@ name = "error273"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# The windowed ASCII renderer. Off by default: the headless build must keep its
+# dependency set and its build time.
+window = ["bevy/default_platform", "bevy/2d_bevy_render"]
+
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = ["default_app"] }
 
