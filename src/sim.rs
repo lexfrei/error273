@@ -1227,7 +1227,7 @@ pub fn ritual_lift(tick: u64, lifted_until: u64) -> f32 {
 /// ground pays here because far ground is richer, which is the same effect
 /// arrived at from the thing that causes it.
 pub fn haul_load(effective: f32, ground: f32, banked: f32) -> (u32, f32) {
-    let earned = banked + (HAUL_BASE + effective.max(0.0) * HAUL_LOAD_SWING) * ground.max(1.0);
+    let earned = banked + (HAUL_BASE + effective.max(0.0) * HAUL_LOAD_SWING) * ground.max(0.0);
     let whole = earned.floor();
     (whole as u32, earned - whole)
 }
@@ -1236,12 +1236,76 @@ pub fn haul_load(effective: f32, ground: f32, banked: f32) -> (u32, f32) {
 /// under them gives. The two are composed here rather than at the one place
 /// that calls it, so that what a patch's richness does to a load is a thing a
 /// test can hold rather than an argument somebody has to have passed correctly.
-pub fn lift_at(at: IVec2, effective: f32, banked: f32) -> (u32, f32) {
+pub fn lift_at(at: IVec2, share: f32, effective: f32, banked: f32) -> (u32, f32) {
     haul_load(
         effective,
-        richness_at((at - CENTER).abs().max_element()),
+        richness_at((at - CENTER).abs().max_element()) * share,
         banked,
     )
+}
+
+/// What a citizen can carry away in one trip.
+///
+/// The two theorems this layer is built on divide the work between them here.
+/// Orians and Pearson set how big the sack is and say it should be bigger from
+/// further away, so it is the ground's richness again: one load at the hearth
+/// and better than two at the far edge. Charnov then decides whether it is
+/// worth staying to fill it. Without a sack, time at a patch turns into stores
+/// at a fixed rate with nothing to stop it, which is mining rather than
+/// foraging; with a sack of a fixed several loads, the near ring -- which is
+/// every colony's whole diet -- is quietly retuned upward, which this layer may
+/// not do. Scaling it with richness is the one shape that does neither, and it
+/// wants no constant of its own.
+pub fn sack_at(at: IVec2, effective: f32) -> u32 {
+    let full = lift_at(at, 1.0, effective, 0.0).0 as f32;
+    let out = richness_at((at - CENTER).abs().max_element());
+    (full * out).round().max(1.0) as u32
+}
+
+/// How much of a full load the next hour at a patch is still worth, counted in
+/// hours already spent there on this visit.
+///
+/// This is within-visit depletion and deliberately not the patch's standing
+/// stock: the easy wood goes first and what is left takes longer to get at,
+/// while a hauler who comes back tomorrow starts on the easy wood again. Keying
+/// it to the stock instead would make every visit to worked ground slower than
+/// the last, which is a retune of the near ring by the back door -- the near
+/// ring is always worked ground -- and the near ring is the one thing this
+/// layer may not move. The first hour of any visit is a full load, exactly the
+/// trip the colony always made.
+pub fn visit_decay(hours: u32) -> f32 {
+    1.0 / (1.0 + hours as f32)
+}
+
+/// What a tick spent standing at `at` costs: the tick itself, and the warmth it
+/// takes if no fire reaches there. This is the substitution ADR 0018 makes --
+/// the theorem's currency is energy and the colony only tracks warmth, so a
+/// tick in the cold is charged twice over.
+pub fn tick_cost_at(at: IVec2, air: &Air) -> f32 {
+    if air.heat_at(at) >= 0.0 { 1.0 } else { 2.0 }
+}
+
+/// What getting to `at` and back costs, which is dead time: no patch is being
+/// worked during it. Counted in the same units as a tick at the patch, so the
+/// two can be added.
+pub fn travel_cost(at: IVec2, air: &Air) -> f32 {
+    let steps = (at - CENTER).abs().max_element() as f32;
+    2.0 * (steps + cost_of_getting_home(at, air))
+}
+
+/// Whether to turn for home. Charnov's rule as written: leave when the marginal
+/// rate in the patch falls to the average rate for the whole cycle, with travel
+/// counted as dead time.
+///
+/// Its counterintuitive consequence is the thing this exists for. A far patch
+/// carries more dead time, so the average it is measured against is lower, so
+/// the crossing comes later and the patch is stripped further. A fixed give-up
+/// rule does the opposite and is why far ground was never worth having.
+pub fn give_up(taken: f32, spent: f32, bite: f32, tick_cost: f32) -> bool {
+    if spent <= 0.0 || tick_cost <= 0.0 {
+        return false;
+    }
+    bite / tick_cost <= taken / spent
 }
 
 /// How good a candidate a citizen is for a vacancy.
@@ -2363,6 +2427,14 @@ pub struct Citizen {
     pub banked: f32,
     /// How much they lifted, decided when they lifted it.
     pub load: u32,
+    /// The kind being taken out of a patch right now, which is not the same as
+    /// what they are carrying home: a trip is over when this becomes that.
+    pub taking: Option<Cargo>,
+    /// What this trip has cost so far, walk out and back included as dead time,
+    /// in the units `tick_cost_at` counts.
+    pub spent: f32,
+    /// Hours already spent working this patch on this visit.
+    pub hours: u32,
     /// What they do with their days, and what they have practised at.
     pub trade: Trade,
     pub experience: [f32; TRADE_COUNT],
@@ -3638,6 +3710,9 @@ pub fn setup(mut commands: Commands, mut lineage: ResMut<Lineage>) {
                 watched: 0.0,
                 banked: 0.0,
                 load: 0,
+                taking: None,
+                spent: 0.0,
+                hours: 0,
                 trade: founding_trade(i),
                 experience: [0.0; TRADE_COUNT],
                 age: founder_age(i, CITIZENS),
@@ -4354,6 +4429,9 @@ pub fn colony_growth(
                 watched: 0.0,
                 banked: 0.0,
                 load: 0,
+                taking: None,
+                spent: 0.0,
+                hours: 0,
                 // A child is nobody's tradesman until they are grown.
                 trade: Trade::Laborer,
                 experience: [0.0; TRADE_COUNT],
@@ -4568,6 +4646,10 @@ pub fn citizen_ai(
                 }
                 flow.delivered(brought);
                 citizen.carrying = None;
+                // The sack is empty again, and it is counted rather than
+                // assumed: a load is built up over several ticks now, so one
+                // left behind here would be delivered twice.
+                citizen.load = 0;
                 // A tradesman fetches their own kind; a labourer goes wherever
                 // the colony is shorter.
                 let next = trade_cargo(citizen.trade)
@@ -4592,28 +4674,63 @@ pub fn citizen_ai(
         {
             // What a citizen lifts is decided here, where it comes out of the
             // ground, so that what leaves the patch is what reaches the store.
+            // A bite rather than a load: the trip ends when the rule says so.
             let raised = citizen.upbringing.stats().of(trade_stat(citizen.trade));
-            let (wanted, banked) = lift_at(
-                cell,
-                effective_stat(
-                    raised,
-                    focus_of(&citizen.needs),
-                    fit,
-                    ritual_lift(tick.0, colony.revels.lifted_until),
-                ),
-                citizen.banked,
+            let effective = effective_stat(
+                raised,
+                focus_of(&citizen.needs),
+                fit,
+                ritual_lift(tick.0, colony.revels.lifted_until),
             );
-            let lifted = colony.patches.take(cell, wanted);
+            let first = citizen.taking.is_none();
+            let cost = tick_cost_at(cell, air);
+            // Read as a value rather than off the citizen, so there is no
+            // window in which the last visit's hour count is still readable.
+            // The bug that costs is asking the patch what the next hour is
+            // worth before clearing that count, which turns the full first load
+            // of every visit into nothing at all, and no unit test can see it.
+            let hours = if first { 0 } else { citizen.hours };
+            // The walk out and the walk home are charged at the start of a
+            // visit: dead time either way, and the rule is about the cycle.
+            if first {
+                citizen.spent = travel_cost(cell, air);
+            }
+            citizen.hours = hours;
+            let (wanted, banked) = lift_at(cell, visit_decay(hours), effective, citizen.banked);
+            // The first hour of a visit always takes something, so no walk is
+            // made for nothing and nobody is parked on ground too poor to
+            // register.
+            let bite = if first { wanted.max(1) } else { wanted };
+            let lifted = colony.patches.take(cell, bite);
             if lifted > 0 {
                 citizen.banked = banked;
-                citizen.load = lifted;
-                citizen.carrying = Some(kind);
+                citizen.load += lifted;
+                citizen.taking = Some(kind);
+                citizen.spent += cost;
+                citizen.hours += 1;
+            }
+            // Whether to stay for another hour, decided in the hour that just
+            // ended rather than in the next one. Asking on the following tick
+            // would spend an hour of every trip on the question, which is a tax
+            // on hauling that has nothing to do with the rule being asked.
+            let (next, _) = lift_at(cell, visit_decay(citizen.hours), effective, citizen.banked);
+            let stay = lifted > 0
+                && citizen.load < sack_at(cell, effective)
+                && next > 0
+                && !give_up(citizen.load as f32, citizen.spent, next as f32, cost);
+            if !stay {
+                citizen.carrying = citizen.taking.take();
             }
         }
 
         // Handing a load over or picking one up flips this tick's duty; nothing
         // else about the citizen has changed since it was chosen.
         let duty = choose_duty(&citizen.needs, citizen.carrying, grown, &marks, stage);
+        // Anything that takes a citizen off the patch ends the trip: they carry
+        // home what they have rather than abandoning it and starting again.
+        if duty != Duty::Gather && citizen.taking.is_some() {
+            citizen.carrying = citizen.taking.take();
+        }
         // Only a working citizen has working hours for the cold to take.
         if grown {
             citizen.needs.spend(duty == Duty::WarmUp, pos.0);
@@ -7560,6 +7677,124 @@ mod tests {
         }
     }
 
+    /// Work one patch to the give-up point and say how much came out of it.
+    /// The whole cycle in miniature: a walk out, bites that fall as the patch
+    /// goes down, and a walk home.
+    fn strip(patch: IVec2, cap: u32, air: &Air, effective: f32) -> (u32, u32) {
+        let mut amount = cap;
+        let mut taken = 0u32;
+        let mut spent = travel_cost(patch, air);
+        let cost = tick_cost_at(patch, air);
+        let mut banked = 0.0;
+        let mut bites = 0;
+        let sack = sack_at(patch, effective);
+        while amount > 0 && bites < 10_000 && taken < sack {
+            let (wanted, left) = lift_at(patch, visit_decay(bites), effective, banked);
+            let bite = if bites == 0 { wanted.max(1) } else { wanted }.min(amount);
+            if bites > 0 && (bite == 0 || give_up(taken as f32, spent, bite as f32, cost)) {
+                break;
+            }
+            banked = left;
+            amount -= bite;
+            taken += bite;
+            spent += cost;
+            bites += 1;
+        }
+        (taken, cap - amount)
+    }
+
+    #[test]
+    fn a_sack_is_one_load_at_the_hearth_and_bigger_the_further_out_it_is_filled() {
+        for effective in [0.0, 0.6, 1.4, FIT_CEILING] {
+            let near = CENTER + IVec2::new(4, 0);
+            assert_eq!(
+                sack_at(near, effective),
+                lift_at(near, 1.0, effective, 0.0).0.max(1),
+                "at the hearth the sack is the trip the colony always made, so \
+                 the give-up rule has nothing to decide and the near ring does \
+                 not move"
+            );
+            let far = sack_at(CENTER + IVec2::new(RICHNESS_BEST, 0), effective);
+            assert!(
+                far > sack_at(near, effective),
+                "and further out there is more of it to carry: {far}"
+            );
+        }
+        assert!(sack_at(CENTER, -5.0) >= 1, "nobody walks out for nothing");
+    }
+
+    #[test]
+    fn a_far_patch_is_stripped_further_than_a_near_one() {
+        let air = air(FULL_BURN_FUEL, 0);
+        let cap = 400;
+        let near = CENTER + IVec2::new(6, 0);
+        let far = CENTER + IVec2::new(120, 0);
+        let (_, near_gone) = strip(near, cap, &air, 0.6);
+        let (_, far_gone) = strip(far, cap, &air, 0.6);
+        assert!(
+            far_gone > near_gone,
+            "longer travel has to mean staying longer: {far_gone} out of the far one \
+             against {near_gone} out of the near one"
+        );
+    }
+
+    #[test]
+    fn a_near_patch_is_left_standing_and_a_far_one_need_not_be() {
+        // The theorem's own prediction, and it is the point of the layer: near
+        // ground is left with something because the crossing comes early, and
+        // far ground is worth taking down to the roots because the walk there
+        // was the expensive part. A colony that leaves the near ring standing
+        // is a colony that has a reason to walk.
+        let air = air(FULL_BURN_FUEL, 0);
+        let cap = 400;
+        let (took, gone) = strip(CENTER + IVec2::new(6, 0), cap, &air, 0.6);
+        assert!(took > 0, "a trip near the hearth that took nothing");
+        assert!(
+            gone < cap,
+            "the near ring was worked to nothing, so there is nothing to come back for"
+        );
+        for out in [40, 120, RICHNESS_BEST] {
+            let (took, _) = strip(CENTER + IVec2::new(out, 0), cap, &air, 0.6);
+            assert!(took > 0, "a trip to {out} cells that took nothing");
+        }
+    }
+
+    #[test]
+    fn the_first_bite_is_never_the_one_that_sends_somebody_home() {
+        assert!(
+            !give_up(0.0, 40.0, 1.0, 1.0),
+            "nobody walks out and turns straight round"
+        );
+        assert!(
+            give_up(10.0, 10.0, 0.5, 1.0),
+            "and a bite worth less than the trip has been is the end of it"
+        );
+        assert!(!give_up(10.0, 10.0, 2.0, 1.0), "while a better one is not");
+    }
+
+    #[test]
+    fn the_easy_wood_goes_first_and_a_fresh_visit_starts_on_it_again() {
+        assert_eq!(
+            visit_decay(0),
+            1.0,
+            "the first hour of a visit is the trip the colony always made"
+        );
+        let mut previous = visit_decay(0);
+        for hours in 1..=40 {
+            let share = visit_decay(hours);
+            assert!(share < previous, "an hour that was no worse at {hours}");
+            assert!(share > 0.0, "and the patch never turns hostile");
+            previous = share;
+        }
+    }
+
+    #[test]
+    fn a_tick_in_the_cold_costs_more_than_a_tick_by_the_fire() {
+        let lit = air(FULL_BURN_FUEL, 0);
+        assert!(tick_cost_at(CENTER, &lit) < tick_cost_at(CENTER + IVec2::new(200, 0), &lit));
+        assert!(travel_cost(CENTER + IVec2::new(60, 0), &lit) > travel_cost(CENTER, &lit));
+    }
+
     #[test]
     fn standing_on_richer_ground_lifts_more_of_it() {
         let effective = 0.6;
@@ -7570,7 +7805,7 @@ mod tests {
             let mut banked = 0.0;
             let mut total = 0u32;
             for _ in 0..2000 {
-                let (load, left) = lift_at(at, effective, banked);
+                let (load, left) = lift_at(at, 1.0, effective, banked);
                 total += load;
                 banked = left;
             }
