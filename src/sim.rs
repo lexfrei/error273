@@ -281,11 +281,11 @@ pub const SEASON_DAYS: usize = DAYS_PER_SEASON as usize;
 pub const CHUNK: i32 = 64;
 /// Cells to a step of the lattice the generated field is interpolated over.
 pub const LATTICE: i32 = 24;
-/// How far out richness stops rising. It is not where a trip is worth most:
-/// what a citizen can carry is set by the citizen, so a longer walk brings home
-/// no more in one go. It is where ground stops giving up more before it is bare,
-/// which is as far out as there is any reason to walk. Inside the old rim
-/// richness is exactly what it always was, which keeps the early game unretuned.
+/// How far out richness stops rising, and with it how far out a trip is worth
+/// more. What the ground gives is a factor on what a citizen carries, so past
+/// this mark a longer walk brings home no more and is only longer -- which is
+/// what puts the far edge on the interior optimum. Inside the old rim richness
+/// is exactly one, which keeps the early game unretuned.
 pub const RICHNESS_BEST: i32 = PATCH_RADIUS + 160;
 /// How many cells of walking each step of richness costs to reach.
 pub const RICHNESS_RUN: i32 = 80;
@@ -1213,15 +1213,35 @@ pub fn ritual_lift(tick: u64, lifted_until: u64) -> f32 {
     }
 }
 
-/// What one trip brings home, and what is left banked toward the next. A slope
-/// rather than a step: the fraction is carried forward rather than rolled for,
-/// so a small difference in what the colony raised is a small difference in
-/// what comes back, and the run still replays exactly. This is the only place
+/// What one trip brings home, and what is left banked toward the next.
+///
+/// Two factors: what the citizen brings, and what the ground gives. A slope
+/// rather than a step in both, and the fraction is carried forward rather than
+/// rolled for, so a small difference in either is a small difference in what
+/// comes back and the run still replays exactly. This is the only place
 /// anything the colony raised turns into capacity rather than survival.
-pub fn haul_load(effective: f32, banked: f32) -> (u32, f32) {
-    let earned = banked + HAUL_BASE + effective.max(0.0) * HAUL_LOAD_SWING;
+///
+/// `ground` is the patch's richness and never the distance walked. A term that
+/// paid for the walk itself would pay a hauler for leaving good ground near the
+/// hearth for poor ground further out, which is not what a forager does; far
+/// ground pays here because far ground is richer, which is the same effect
+/// arrived at from the thing that causes it.
+pub fn haul_load(effective: f32, ground: f32, banked: f32) -> (u32, f32) {
+    let earned = banked + (HAUL_BASE + effective.max(0.0) * HAUL_LOAD_SWING) * ground.max(1.0);
     let whole = earned.floor();
     (whole as u32, earned - whole)
+}
+
+/// What a citizen standing on `at` lifts: what they bring, and what the ground
+/// under them gives. The two are composed here rather than at the one place
+/// that calls it, so that what a patch's richness does to a load is a thing a
+/// test can hold rather than an argument somebody has to have passed correctly.
+pub fn lift_at(at: IVec2, effective: f32, banked: f32) -> (u32, f32) {
+    haul_load(
+        effective,
+        richness_at((at - CENTER).abs().max_element()),
+        banked,
+    )
 }
 
 /// How good a candidate a citizen is for a vacancy.
@@ -4573,7 +4593,8 @@ pub fn citizen_ai(
             // What a citizen lifts is decided here, where it comes out of the
             // ground, so that what leaves the patch is what reaches the store.
             let raised = citizen.upbringing.stats().of(trade_stat(citizen.trade));
-            let (wanted, banked) = haul_load(
+            let (wanted, banked) = lift_at(
+                cell,
                 effective_stat(
                     raised,
                     focus_of(&citizen.needs),
@@ -7490,11 +7511,15 @@ mod tests {
 
     /// What a citizen averages over many trips, which is what the colony feels.
     fn carried_per_trip(effective: f32) -> f32 {
+        carried_from(effective, 1.0)
+    }
+
+    fn carried_from(effective: f32, ground: f32) -> f32 {
         let trips = 2000;
         let mut banked = 0.0;
         let mut total = 0u32;
         for _ in 0..trips {
-            let (load, left) = haul_load(effective, banked);
+            let (load, left) = haul_load(effective, ground, banked);
             total += load;
             banked = left;
         }
@@ -7503,27 +7528,98 @@ mod tests {
 
     #[test]
     fn what_a_citizen_carries_home_rises_with_no_step_in_it() {
-        let mut previous = 0.0;
-        for notch in 0..=36 {
-            let effective = notch as f32 * 0.05;
-            let carried = carried_per_trip(effective);
-            assert!(
-                carried > previous,
-                "a step at effective {effective}: {carried} is no better than {previous}"
-            );
-            previous = carried;
+        for ground in [1.0, 1.5, RICHNESS_CAP + 1.0] {
+            let mut previous = 0.0;
+            for notch in 0..=36 {
+                let effective = notch as f32 * 0.05;
+                let carried = carried_from(effective, ground);
+                assert!(
+                    carried > previous,
+                    "a step at effective {effective} on ground {ground}: \
+                     {carried} is no better than {previous}"
+                );
+                previous = carried;
+            }
         }
     }
 
     #[test]
-    fn a_hauler_who_is_owed_a_fraction_is_paid_it_eventually() {
-        let effective = 0.42;
-        let expected = HAUL_BASE + effective * HAUL_LOAD_SWING;
-        let carried = carried_per_trip(effective);
+    fn what_a_citizen_carries_home_rises_with_the_ground_and_with_no_step_in_that_either() {
+        for effective in [0.0, 0.4, 1.2, FIT_CEILING] {
+            let mut previous = 0.0;
+            for notch in 0..=40 {
+                let ground = 1.0 + notch as f32 * (RICHNESS_CAP / 40.0);
+                let carried = carried_from(effective, ground);
+                assert!(
+                    carried > previous,
+                    "a step at ground {ground} for effective {effective}: \
+                     {carried} is no better than {previous}"
+                );
+                previous = carried;
+            }
+        }
+    }
+
+    #[test]
+    fn standing_on_richer_ground_lifts_more_of_it() {
+        let effective = 0.6;
+        let near = CENTER + IVec2::new(PATCH_RADIUS, 0);
+        let out = CENTER + IVec2::new(RICHNESS_BEST, 0);
+        let past = CENTER + IVec2::new(RICHNESS_BEST * 2, 0);
+        let take = |at| {
+            let mut banked = 0.0;
+            let mut total = 0u32;
+            for _ in 0..2000 {
+                let (load, left) = lift_at(at, effective, banked);
+                total += load;
+                banked = left;
+            }
+            total as f32 / 2000.0
+        };
         assert!(
-            (carried - expected).abs() < 0.01,
-            "the banked fraction has to come back: {carried} against {expected}"
+            take(out) > take(near),
+            "the same citizen brings more back from richer ground"
         );
+        assert_eq!(
+            take(past),
+            take(out),
+            "and past the best of it, further is only further"
+        );
+        assert_eq!(
+            take(near),
+            carried_per_trip(effective),
+            "the near ring is the trip it always was"
+        );
+    }
+
+    #[test]
+    fn the_ground_the_near_ring_stands_on_changes_nothing_about_a_trip() {
+        for distance in 0..=PATCH_RADIUS {
+            for effective in [0.0, 0.37, 1.4] {
+                assert_eq!(
+                    carried_from(effective, richness_at(distance)),
+                    carried_from(effective, 1.0),
+                    "the early game is not retuned by this"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_trip_takes_what_the_citizen_brings_and_what_the_ground_gives() {
+        // This assertion used to say a trip carried the citizen's figure and
+        // nothing else, which is what made the interior optimum ADR 0016
+        // asserts impossible. It now says what the second factor is, and the
+        // banked fraction still has to come back either way.
+        let effective = 0.42;
+        for ground in [1.0, 1.6, RICHNESS_CAP + 1.0] {
+            let expected = (HAUL_BASE + effective * HAUL_LOAD_SWING) * ground;
+            let carried = carried_from(effective, ground);
+            assert!(
+                (carried - expected).abs() < 0.01,
+                "on ground {ground}: {carried} against {expected}"
+            );
+        }
     }
 
     #[test]
@@ -7531,7 +7627,7 @@ mod tests {
         // The patch is stripped for a load at the moment it is picked up, so a
         // trip that carried nothing would have destroyed what it left behind.
         for effective in [-5.0, 0.0, 0.01, FIT_CEILING] {
-            let (load, banked) = haul_load(effective, 0.0);
+            let (load, banked) = haul_load(effective, 1.0, 0.0);
             assert!(
                 load >= 1,
                 "a trip that lifts nothing strips the treeline for free"
