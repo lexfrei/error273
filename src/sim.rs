@@ -429,6 +429,10 @@ pub const PERFORMANCE_SALT: u64 = 0x81;
 /// than a hum in the background.
 pub const PERFORMANCE_REACH: i32 = 4;
 pub const PERFORMANCE_HOUR: u64 = 19;
+/// How long before it starts the evening is called, in hours. A citizen walks a
+/// cell an hour, so the same number is how far away anybody will come from: the
+/// call is the catchment, and it needs no second constant to say so.
+pub const PERFORMANCE_CALL: u64 = 8;
 pub const FIT_FLOOR: f32 = 0.5;
 pub const FIT_STAT: f32 = 0.6;
 pub const FIT_PRACTICE: f32 = 0.5;
@@ -1745,6 +1749,8 @@ pub struct Colony<'w, 's> {
     pub missing: ResMut<'w, Missing>,
     /// Who has just stopped being here, which the weather asks about.
     pub toll: ResMut<'w, Toll>,
+    /// Where tonight's performances will be, so a citizen can decide to go.
+    pub stages: Res<'w, Stages>,
 }
 
 /// Everything about the air, gathered into one borrow: what the weather is
@@ -2281,6 +2287,9 @@ pub enum Duty {
     Deliver,
     Rest,
     Gather,
+    /// Walking to tonight's performance. The only duty that answers a need
+    /// nobody can meet alone, and the only one that is not work.
+    Attend,
 }
 
 /// Deterministic noise in `[0, 1)` from a pair of integers. The simulation has
@@ -2750,11 +2759,41 @@ pub fn step_toward(from: IVec2, to: IVec2) -> IVec2 {
 
 /// The most urgent thing a citizen could be doing. A need that kills outranks
 /// the load on their back; tiredness does not.
+/// How long until tonight's performance, in ticks, which is also in cells: a
+/// citizen covers one of each per tick.
+pub fn ticks_until_performance(tick: u64) -> u64 {
+    let start = PERFORMANCE_HOUR * TICKS_PER_HOUR;
+    let now = tick % ticks_per_day();
+    if now < start {
+        start - now
+    } else {
+        ticks_per_day() - now + start
+    }
+}
+
+/// The stage this citizen should be walking to, if the walk is worth starting
+/// now. Nobody leaves early: the walk begins when it is as long as the time
+/// left, so attending costs the colony a walk it was going to make anyway
+/// rather than an afternoon.
+pub fn stage_to_attend(stages: &[IVec2], at: IVec2, tick: u64) -> Option<IVec2> {
+    let left = ticks_until_performance(tick);
+    if left > PERFORMANCE_CALL {
+        return None;
+    }
+    stages
+        .iter()
+        .map(|stage| ((*stage - at).abs().max_element() as u64, *stage))
+        .filter(|(walk, _)| *walk <= PERFORMANCE_CALL && *walk >= left)
+        .min_by_key(|(walk, stage)| (*walk, stage.x, stage.y))
+        .map(|(_, stage)| stage)
+}
+
 pub fn choose_duty(
     needs: &Needs,
     carrying: Option<Cargo>,
     grown: bool,
     marks: &[Marks; NEED_COUNT],
+    stage: Option<IVec2>,
 ) -> Duty {
     for kind in needs.pressing_by_urgency(marks) {
         match kind {
@@ -2762,9 +2801,13 @@ pub fn choose_duty(
             NeedKind::Food => return Duty::Eat,
             NeedKind::Rest if carrying.is_none() => return Duty::Rest,
             NeedKind::Rest => {}
-            // Nothing to walk to on your own account: being amused takes
-            // somebody else's hour, so a bored citizen keeps working and is
-            // amused if a performance happens where they are.
+            // The one need that takes somebody else's hour, so it is the one
+            // need with nowhere to go until somebody is offering. A citizen
+            // with a load delivers it first: a stage is not worth dropping
+            // what the colony is waiting on.
+            NeedKind::Recreation if grown && carrying.is_none() && stage.is_some() => {
+                return Duty::Attend;
+            }
             NeedKind::Recreation => {}
         }
     }
@@ -2779,6 +2822,18 @@ pub fn choose_duty(
     }
 }
 
+/// The places a citizen could be walking to this tick, gathered so that picking
+/// one reads as a choice between errands rather than as an argument list.
+#[derive(Debug, Clone, Copy)]
+pub struct Errands {
+    /// Where a load already in hand is wanted.
+    pub drop_off: IVec2,
+    /// The patch they are working, if any is left on it.
+    pub source: Option<IVec2>,
+    /// Tonight's performance, if it is worth setting out for yet.
+    pub stage: Option<IVec2>,
+}
+
 /// Where a citizen walks this tick. `source` is the patch they are working, if
 /// any is left, and `drop_off` is wherever their load is wanted.
 pub fn duty_target(
@@ -2787,14 +2842,16 @@ pub fn duty_target(
     air: &Air,
     at: IVec2,
     home: IVec2,
-    drop_off: IVec2,
-    source: Option<IVec2>,
+    to: Errands,
 ) -> IVec2 {
     match duty {
         Duty::WarmUp => air.warmth_target(home, at),
         Duty::Eat => CENTER,
-        Duty::Deliver => drop_off,
+        Duty::Deliver => to.drop_off,
         Duty::Rest => home,
+        // Nobody holds this duty without a stage to hold it for, so the warm
+        // ground is a fallback that never fires rather than a second rule.
+        Duty::Attend => to.stage.unwrap_or_else(|| air.warmth_target(home, at)),
         // An entertainer's work is the evening, so their day is spent standing
         // where it will happen. The warmest cell is the stage because a cold
         // audience does not gather and a cold performance does not land, and
@@ -2802,7 +2859,7 @@ pub fn duty_target(
         // nothing.
         Duty::Gather if trade == Trade::Entertainer => air.warmth_target(home, at),
         // With the patches stripped there is no work left, only warmth to find.
-        Duty::Gather => source.unwrap_or_else(|| air.warmth_target(home, at)),
+        Duty::Gather => to.source.unwrap_or_else(|| air.warmth_target(home, at)),
     }
 }
 
@@ -3731,6 +3788,24 @@ pub fn send_scouts(
 #[derive(Resource)]
 pub struct Revels(pub Outcome);
 
+/// Where tonight's performances will be. Published before anybody decides what
+/// to do with the rest of their day, which is the whole of what makes an
+/// audience assemble rather than happen to be standing there.
+#[derive(Resource, Default)]
+pub struct Stages(pub Vec<IVec2>);
+
+/// Entertainers hold the warm ground, so the call is where they are standing
+/// rather than a booking made in advance.
+pub fn call_the_evening(mut stages: ResMut<Stages>, citizens: Query<(&Pos, &Citizen)>) {
+    stages.0.clear();
+    stages.0.extend(
+        citizens
+            .iter()
+            .filter(|(_, citizen)| citizen.trade == Trade::Entertainer && is_adult(citizen.age))
+            .map(|(pos, _)| pos.0),
+    );
+}
+
 impl Default for Revels {
     fn default() -> Self {
         Self(Outcome::Boring)
@@ -4204,11 +4279,12 @@ pub fn citizen_ai(
         // What the walk home would cost from where they are standing, which is
         // what warmth's marks are measured against rather than a fixed number.
         let marks = marks_for(cost_of_getting_home(pos.0, air), caution_margin(&citizen));
+        let stage = stage_to_attend(&colony.stages.0, pos.0, tick.0);
         let fit = trade_fit(
             citizen.upbringing.stats().of(trade_stat(citizen.trade)),
             citizen.experience[citizen.trade as usize],
         );
-        let duty = choose_duty(&citizen.needs, citizen.carrying, grown, &marks);
+        let duty = choose_duty(&citizen.needs, citizen.carrying, grown, &marks, stage);
 
         // Eating is what makes the food need met this tick, so it happens before
         // the needs are stepped.
@@ -4374,7 +4450,7 @@ pub fn citizen_ai(
 
         // Handing a load over or picking one up flips this tick's duty; nothing
         // else about the citizen has changed since it was chosen.
-        let duty = choose_duty(&citizen.needs, citizen.carrying, grown, &marks);
+        let duty = choose_duty(&citizen.needs, citizen.carrying, grown, &marks, stage);
         // Only a working citizen has working hours for the cold to take.
         if grown {
             citizen.needs.spend(duty == Duty::WarmUp, pos.0);
@@ -4408,8 +4484,11 @@ pub fn citizen_ai(
                 air,
                 pos.0,
                 citizen.home,
-                drop_off,
-                source.map(|(cell, _)| cell),
+                Errands {
+                    drop_off,
+                    source: source.map(|(cell, _)| cell),
+                    stage,
+                },
             ),
         };
         if pos.0 != target {
@@ -4820,15 +4899,18 @@ mod tests {
         let mut needs = Needs::newcomer();
         set(&mut needs, NeedKind::Rest, NeedKind::Rest.rules().low, true);
         assert_eq!(
-            choose_duty(&needs, Some(Cargo::Wood), true, &at_the_fire()),
+            choose_duty(&needs, Some(Cargo::Wood), true, &at_the_fire(), None),
             Duty::Deliver,
             "wood is dropped off before bed"
         );
-        assert_eq!(choose_duty(&needs, None, true, &at_the_fire()), Duty::Rest);
+        assert_eq!(
+            choose_duty(&needs, None, true, &at_the_fire(), None),
+            Duty::Rest
+        );
 
         set(&mut needs, NeedKind::Food, 1.0, true);
         assert_eq!(
-            choose_duty(&needs, Some(Cargo::Wood), true, &at_the_fire()),
+            choose_duty(&needs, Some(Cargo::Wood), true, &at_the_fire(), None),
             Duty::Eat,
             "a starving citizen puts the load down"
         );
@@ -4838,11 +4920,11 @@ mod tests {
     fn a_citizen_with_nothing_pressing_goes_to_work() {
         let needs = Needs::newcomer();
         assert_eq!(
-            choose_duty(&needs, None, true, &at_the_fire()),
+            choose_duty(&needs, None, true, &at_the_fire(), None),
             Duty::Gather
         );
         assert_eq!(
-            choose_duty(&needs, Some(Cargo::Food), true, &at_the_fire()),
+            choose_duty(&needs, Some(Cargo::Food), true, &at_the_fire(), None),
             Duty::Deliver
         );
     }
@@ -4860,8 +4942,11 @@ mod tests {
                 &lit,
                 CENTER,
                 home,
-                drop_off,
-                Some(patch)
+                Errands {
+                    drop_off,
+                    source: Some(patch),
+                    stage: None,
+                },
             ),
             CENTER
         );
@@ -4872,8 +4957,11 @@ mod tests {
                 &lit,
                 CENTER,
                 home,
-                drop_off,
-                Some(patch)
+                Errands {
+                    drop_off,
+                    source: Some(patch),
+                    stage: None,
+                },
             ),
             CENTER
         );
@@ -4884,8 +4972,11 @@ mod tests {
                 &lit,
                 CENTER,
                 home,
-                drop_off,
-                Some(patch)
+                Errands {
+                    drop_off,
+                    source: Some(patch),
+                    stage: None,
+                },
             ),
             drop_off
         );
@@ -4896,8 +4987,11 @@ mod tests {
                 &lit,
                 CENTER,
                 home,
-                drop_off,
-                Some(patch)
+                Errands {
+                    drop_off,
+                    source: Some(patch),
+                    stage: None,
+                },
             ),
             home
         );
@@ -4908,8 +5002,11 @@ mod tests {
                 &lit,
                 CENTER,
                 home,
-                drop_off,
-                Some(patch)
+                Errands {
+                    drop_off,
+                    source: Some(patch),
+                    stage: None,
+                },
             ),
             patch
         );
@@ -4926,8 +5023,11 @@ mod tests {
                 &air(FULL_BURN_FUEL, 0),
                 CENTER,
                 home,
-                drop_off,
-                None
+                Errands {
+                    drop_off,
+                    source: None,
+                    stage: None,
+                },
             ),
             CENTER,
             "while the fire burns, idle citizens huddle around it"
@@ -4939,11 +5039,134 @@ mod tests {
                 &air(0, 0),
                 CENTER,
                 home,
-                drop_off,
-                None
+                Errands {
+                    drop_off,
+                    source: None,
+                    stage: None,
+                },
             ),
             home,
             "once it is out, the only shelter left is their own roof"
+        );
+    }
+
+    #[test]
+    fn the_evening_is_over_once_it_has_happened() {
+        let hour = PERFORMANCE_HOUR * TICKS_PER_HOUR;
+        assert_eq!(ticks_until_performance(hour - 1), 1);
+        assert_eq!(
+            ticks_until_performance(hour),
+            ticks_per_day(),
+            "the hour it starts, the next one anybody can walk to is tomorrow"
+        );
+        assert_eq!(ticks_until_performance(hour + 1), ticks_per_day() - 1);
+    }
+
+    #[test]
+    fn nobody_leaves_the_work_early_for_the_evening() {
+        let stage = CENTER;
+        let at = CENTER + IVec2::new(6, 0);
+        let hour = PERFORMANCE_HOUR * TICKS_PER_HOUR;
+        assert_eq!(
+            stage_to_attend(&[stage], at, hour - 8),
+            None,
+            "eight hours out, a six-cell walk is two hours of work still to do"
+        );
+        assert_eq!(
+            stage_to_attend(&[stage], at, hour - 6),
+            Some(stage),
+            "the walk starts when it is exactly as long as the time left"
+        );
+    }
+
+    #[test]
+    fn an_evening_calls_only_as_far_as_a_citizen_can_walk() {
+        let stage = CENTER;
+        let too_far = CENTER + IVec2::new(PERFORMANCE_CALL as i32 + 1, 0);
+        for tick in 0..ticks_per_day() {
+            assert_eq!(
+                stage_to_attend(&[stage], too_far, tick),
+                None,
+                "nobody sets out on a walk longer than the call"
+            );
+        }
+        let reachable = CENTER + IVec2::new(PERFORMANCE_CALL as i32, 0);
+        assert_eq!(
+            stage_to_attend(&[stage], reachable, PERFORMANCE_HOUR - PERFORMANCE_CALL),
+            Some(stage),
+            "and the furthest one who can make it sets out at the call"
+        );
+    }
+
+    #[test]
+    fn the_nearest_stage_is_the_one_worth_walking_to() {
+        let near = CENTER + IVec2::new(2, 0);
+        let far = CENTER + IVec2::new(5, 0);
+        assert_eq!(
+            stage_to_attend(&[far, near], CENTER, PERFORMANCE_HOUR - 2),
+            Some(near)
+        );
+    }
+
+    #[test]
+    fn a_survival_need_outranks_the_evening() {
+        let stage = Some(CENTER);
+        let mut bored = contented();
+        set(&mut bored, NeedKind::Recreation, 0.0, true);
+        assert_eq!(
+            choose_duty(&bored, None, true, &at_the_fire(), stage),
+            Duty::Attend,
+            "with nothing else the matter, a bored citizen goes"
+        );
+        assert_eq!(
+            choose_duty(&bored, None, true, &at_the_fire(), None),
+            Duty::Gather,
+            "and works when nobody is offering"
+        );
+        assert_eq!(
+            choose_duty(&bored, Some(Cargo::Wood), true, &at_the_fire(), stage),
+            Duty::Deliver,
+            "a load the colony is waiting on comes first"
+        );
+        let mut starving = bored;
+        set(&mut starving, NeedKind::Food, 0.0, true);
+        assert_eq!(
+            choose_duty(&starving, None, true, &at_the_fire(), stage),
+            Duty::Eat,
+            "and so does anything that kills"
+        );
+    }
+
+    #[test]
+    fn a_child_stays_in_whatever_is_on_that_evening() {
+        let mut bored = contented();
+        set(&mut bored, NeedKind::Recreation, 0.0, true);
+        assert_eq!(
+            choose_duty(&bored, None, false, &at_the_fire(), Some(CENTER)),
+            Duty::Rest,
+            "children are mouths, not an audience"
+        );
+    }
+
+    #[test]
+    fn a_citizen_called_to_the_evening_walks_to_the_stage() {
+        let stage = CENTER + IVec2::new(3, 3);
+        let home = IVec2::new(-5, -5);
+        let lit = air(FULL_BURN_FUEL, 0);
+        assert_eq!(
+            duty_target(
+                Duty::Attend,
+                Trade::Woodcutter,
+                &lit,
+                home,
+                home,
+                Errands {
+                    drop_off: home,
+                    source: Some(IVec2::new(9, 9)),
+                    stage: Some(stage),
+                },
+            ),
+            stage
         );
     }
 
@@ -4959,8 +5182,11 @@ mod tests {
                 &lit,
                 home,
                 home,
-                home,
-                Some(patch)
+                Errands {
+                    drop_off: home,
+                    source: Some(patch),
+                    stage: None,
+                },
             ),
             patch,
             "every other trade walks to the work"
@@ -4972,8 +5198,11 @@ mod tests {
                 &lit,
                 home,
                 home,
-                home,
-                Some(patch)
+                Errands {
+                    drop_off: home,
+                    source: Some(patch),
+                    stage: None,
+                },
             ),
             lit.warmth_target(home, home),
             "an entertainer holds the warm ground instead, with work in reach"
@@ -5759,7 +5988,7 @@ mod tests {
             "this citizen is worse off for cold than for hunger"
         );
         assert_eq!(
-            choose_duty(&desperate, None, true, &at_the_fire()),
+            choose_duty(&desperate, None, true, &at_the_fire(), None),
             Duty::WarmUp,
             "so the cold is what they walk towards"
         );
@@ -5978,9 +6207,12 @@ mod tests {
     #[test]
     fn a_child_stays_out_of_the_way_instead_of_going_to_work() {
         let calm = Needs::newcomer();
-        assert_eq!(choose_duty(&calm, None, true, &at_the_fire()), Duty::Gather);
         assert_eq!(
-            choose_duty(&calm, None, false, &at_the_fire()),
+            choose_duty(&calm, None, true, &at_the_fire(), None),
+            Duty::Gather
+        );
+        assert_eq!(
+            choose_duty(&calm, None, false, &at_the_fire(), None),
             Duty::Rest,
             "children are mouths, not hands, until they are grown"
         );
@@ -5995,7 +6227,10 @@ mod tests {
             NeedKind::Food.rules().low,
             true,
         );
-        assert_eq!(choose_duty(&hungry, None, false, &at_the_fire()), Duty::Eat);
+        assert_eq!(
+            choose_duty(&hungry, None, false, &at_the_fire(), None),
+            Duty::Eat
+        );
         let mut cold = Needs::newcomer();
         set(
             &mut cold,
@@ -6004,7 +6239,7 @@ mod tests {
             true,
         );
         assert_eq!(
-            choose_duty(&cold, None, false, &at_the_fire()),
+            choose_duty(&cold, None, false, &at_the_fire(), None),
             Duty::WarmUp
         );
     }
