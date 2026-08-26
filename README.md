@@ -158,7 +158,7 @@ A mood is two numbers as well. There is where it is headed, which is worked out 
 
 Under the mood and far slower there is what the years have actually done to somebody. A mood is about a day and forgets one; this keeps what is left when enough days have gone the same way, deepening only while a mood stays low and fading only while it stays high, with a gap between those two marks so that a citizen's history does not flicker with their afternoon. It is measured in years both ways and it fades far slower than it fills, because a thing that heals in a season is a mood by another name.
 
-Nothing acts on a mood yet. The ballot keeps its own two currencies -- what a need cost somebody and what a walk wasted -- until there is a layer that gives a mood somewhere to go. It is printed first so that what is happening to people is visible before anything happens because of it.
+Nothing acts on a mood yet -- the lift a good evening leaves the colony is worked out from how the night went, not from how anybody feels about it. The ballot keeps its own two currencies -- what a need cost somebody and what a walk wasted -- until there is a layer that gives a mood somewhere to go. It is printed first so that what is happening to people is visible before anything happens because of it.
 
 ### The year
 
