@@ -354,7 +354,7 @@ fn paint_status(
         ages,
         stats,
         mood,
-        revel: revels.0.name(),
+        revel: revels.last.name(),
         card,
     };
     let painted = status_lines(&status);

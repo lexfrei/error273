@@ -433,6 +433,13 @@ pub const PERFORMANCE_HOUR: u64 = 19;
 /// cell an hour, so the same number is how far away anybody will come from: the
 /// call is the catchment, and it needs no second constant to say so.
 pub const PERFORMANCE_CALL: u64 = 8;
+/// What a good night leaves the colony working at while it lasts. Deliberately
+/// not a focus term: ADR 0010's number is a ceiling of one that falls, and a
+/// colony fresh off a good evening is not less distracted -- it is the same
+/// people working better, which is a different multiplier with a different
+/// reader. This is the one place anything about the colony's spirits reaches
+/// what its hours are worth.
+pub const RITUAL_LIFT: f32 = 0.1;
 pub const FIT_FLOOR: f32 = 0.5;
 pub const FIT_STAT: f32 = 0.6;
 pub const FIT_PRACTICE: f32 = 0.5;
@@ -1015,7 +1022,7 @@ impl Outcome {
     }
 
     /// How many days a night like this is still worth something for.
-    pub fn mood_days(self) -> u64 {
+    pub fn good_days(self) -> u64 {
         match self {
             Outcome::Fun => CHEER_DAYS_FUN,
             Outcome::Unforgettable => CHEER_DAYS_UNFORGETTABLE,
@@ -1110,8 +1117,30 @@ pub fn focus_band(focus: f32) -> Focus {
 /// What a citizen brings to the work: what the colony raised in them, scaled by
 /// how much of themselves they have to give today and by how well they fit the
 /// trade. The one product every consequence of a mismatch comes out of.
-pub fn effective_stat(base: f32, focus_mult: f32, trade_fit_mult: f32) -> f32 {
-    base * focus_mult * trade_fit_mult
+pub fn effective_stat(base: f32, focus_mult: f32, trade_fit_mult: f32, spirits_mult: f32) -> f32 {
+    base * focus_mult * trade_fit_mult * spirits_mult
+}
+
+/// When the lift runs out after tonight, given when it was already running out.
+/// A night that went well moves the expiry to whichever is later and no
+/// further, so a second one inside the window buys a longer good week and never
+/// a faster one; a night that did not go well takes nothing away.
+pub fn lift_after(standing: u64, outcome: Outcome, tick: u64) -> u64 {
+    if outcome.went_well() {
+        standing.max(tick + outcome.good_days() * ticks_per_day())
+    } else {
+        standing
+    }
+}
+
+/// What the colony's spirits are worth at the work: one, or a little more for
+/// as long as a good night is still with it.
+pub fn ritual_lift(tick: u64, lifted_until: u64) -> f32 {
+    if tick < lifted_until {
+        1.0 + RITUAL_LIFT
+    } else {
+        1.0
+    }
 }
 
 /// What one trip brings home, and what is left banked toward the next. A slope
@@ -1751,6 +1780,9 @@ pub struct Colony<'w, 's> {
     pub toll: ResMut<'w, Toll>,
     /// Where tonight's performances will be, so a citizen can decide to go.
     pub stages: Res<'w, Stages>,
+    /// How the last evening went, and how long the colony is still working off
+    /// the good of it.
+    pub revels: Res<'w, Revels>,
 }
 
 /// Everything about the air, gathered into one borrow: what the weather is
@@ -3786,7 +3818,14 @@ pub fn send_scouts(
 /// How the last performance went, so that a watcher can see the thing the
 /// entertainer's hour bought.
 #[derive(Resource)]
-pub struct Revels(pub Outcome);
+pub struct Revels {
+    pub last: Outcome,
+    /// When the lift a good night left the colony runs out. A second good night
+    /// inside the window moves this to the later expiry and no further: two
+    /// evenings in a week are a longer good week, not a faster one. Without
+    /// that, back-to-back performances would be a multiplier farm.
+    pub lifted_until: u64,
+}
 
 /// Where tonight's performances will be. Published before anybody decides what
 /// to do with the rest of their day, which is the whole of what makes an
@@ -3808,7 +3847,10 @@ pub fn call_the_evening(mut stages: ResMut<Stages>, citizens: Query<(&Pos, &Citi
 
 impl Default for Revels {
     fn default() -> Self {
-        Self(Outcome::Boring)
+        Self {
+            last: Outcome::Boring,
+            lifted_until: 0,
+        }
     }
 }
 
@@ -3854,8 +3896,9 @@ pub fn perform(
         // The tradition term is nothing until a colony has traditions.
         let quality = performance_quality(audience.len(), warmth, performer, 0.0);
         let outcome = performance_outcome(quality, WORLD_SEED, tick.0 ^ seed);
-        let cheered_until = tick.0 + outcome.mood_days() * ticks_per_day();
-        revels.0 = outcome;
+        let cheered_until = tick.0 + outcome.good_days() * ticks_per_day();
+        revels.lifted_until = lift_after(revels.lifted_until, outcome, tick.0);
+        revels.last = outcome;
         for (pos, mut citizen) in &mut citizens {
             if (pos.0 - stage).abs().max_element() > PERFORMANCE_REACH || air.heat_at(pos.0) < 0.0 {
                 continue;
@@ -4437,7 +4480,12 @@ pub fn citizen_ai(
             // ground, so that what leaves the patch is what reaches the store.
             let raised = citizen.upbringing.stats().of(trade_stat(citizen.trade));
             let (wanted, banked) = haul_load(
-                effective_stat(raised, focus_of(&citizen.needs), fit),
+                effective_stat(
+                    raised,
+                    focus_of(&citizen.needs),
+                    fit,
+                    ritual_lift(tick.0, colony.revels.lifted_until),
+                ),
                 citizen.banked,
             );
             let lifted = colony.patches.take(cell, wanted);
@@ -5047,6 +5095,48 @@ mod tests {
             ),
             home,
             "once it is out, the only shelter left is their own roof"
+        );
+    }
+
+    #[test]
+    fn a_good_night_is_worth_something_at_the_work_and_a_bad_one_is_not() {
+        assert_eq!(ritual_lift(0, 0), 1.0, "a colony with nothing behind it");
+        assert!(ritual_lift(0, 10) > 1.0, "and one still on a good night");
+        assert_eq!(
+            ritual_lift(10, 10),
+            1.0,
+            "the window is over on the tick it names"
+        );
+        assert_eq!(
+            lift_after(0, Outcome::Boring, 100),
+            0,
+            "a night nobody enjoyed leaves nothing"
+        );
+        assert_eq!(lift_after(0, Outcome::Terrible, 100), 0);
+        assert!(lift_after(0, Outcome::Fun, 100) > 100);
+    }
+
+    #[test]
+    fn a_second_good_night_extends_the_lift_and_never_doubles_it() {
+        let day = ticks_per_day();
+        let first = lift_after(0, Outcome::Fun, 0);
+        let again = lift_after(first, Outcome::Fun, day);
+        assert_eq!(
+            again,
+            day + Outcome::Fun.good_days() * day,
+            "the second night moves the expiry out from itself"
+        );
+        assert!(again > first, "which is longer than the first left it");
+        assert_eq!(
+            ritual_lift(day, again),
+            ritual_lift(0, first),
+            "and the colony works at the same rate through both of them"
+        );
+        let great = lift_after(0, Outcome::Unforgettable, 0);
+        assert_eq!(
+            lift_after(great, Outcome::Fun, 0),
+            great,
+            "a lesser night inside the window takes nothing back"
         );
     }
 
@@ -7193,11 +7283,11 @@ mod tests {
     fn the_focus_layer_is_wired_but_empty() {
         let base = 0.6;
         assert_eq!(
-            effective_stat(base, 1.0, 1.0),
+            effective_stat(base, 1.0, 1.0, 1.0),
             base,
             "until the mood layer lands, focus must change nothing"
         );
-        assert!(effective_stat(base, 1.0, 1.5) > base);
+        assert!(effective_stat(base, 1.0, 1.5, 1.0) > base);
     }
 
     /// What a citizen averages over many trips, which is what the colony feels.
@@ -9406,9 +9496,9 @@ mod tests {
 
     #[test]
     fn only_a_night_that_went_well_is_worth_anything() {
-        assert!(Outcome::Unforgettable.mood_days() > Outcome::Fun.mood_days());
-        assert_eq!(Outcome::Boring.mood_days(), 0);
-        assert_eq!(Outcome::Terrible.mood_days(), 0);
+        assert!(Outcome::Unforgettable.good_days() > Outcome::Fun.good_days());
+        assert_eq!(Outcome::Boring.good_days(), 0);
+        assert_eq!(Outcome::Terrible.good_days(), 0);
         for outcome in [
             Outcome::Terrible,
             Outcome::Boring,

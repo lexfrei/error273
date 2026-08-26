@@ -90,7 +90,7 @@ pub fn print_status(
         ages,
         stats,
         mood,
-        revel: revels.0.name(),
+        revel: revels.last.name(),
         card,
     };
     for line in status_lines(&status) {
