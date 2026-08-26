@@ -1,7 +1,8 @@
 # 0018. What a trip takes depends on the ground, and when to stop taking it
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-08-26
+- Amended: 2026-08-26
 
 ## Context
 
@@ -22,3 +23,21 @@ The interior optimum ADR 0016 asserted becomes real and becomes testable, and th
 Haulers are away from the fire longer, which is the leash's business. ADR 0017's expectations and warmth's marks were tuned against trips that spent a single tick at the patch. If the death rate moves, that is a finding about the leash and it is reported as one; it is not absorbed by moving the marks, because a mark that moves to accommodate a change nobody measured is how a tuning layer stops meaning anything.
 
 Trip counts stop being a measure of anything. More time at the patch means fewer trips carrying more, so flow is read per hand and by distance band, and any figure quoted in trips is a figure about the give-up rule rather than about the colony.
+
+## Amendment, 2026-08-26, on what was built
+
+Both decisions are built. A trip's take is what the citizen brings times what the ground gives, keyed to richness and flat inside the old rim; a hauler works a patch by the hour and turns for home when the next hour would not beat what the trip has averaged, with the walk counted as dead time and priced in warmth. The theorem's counterintuitive consequence is a test rather than a hope: a far patch is stripped further than a near one. Four things the decision did not contain turned out to be load-bearing, and one thing it promised did not arrive.
+
+**A sack, which this decision never mentions, is required.** Patch time without a bound on what a person can carry is not foraging but mining: measured, a colony hauled itself to two million fuel and nine hundred thousand food by its three-hundredth year. The bound cannot be a constant number of loads either. Swept at one, two, three and four, the colony goes from dying in year six to never dying **between two and three**, with stores at two hundred and forty-six times target per head on the low side of that cliff -- because every colony's whole diet comes from the near ring, so a uniform sack retunes the one thing this layer may not touch. The sack that does neither is the ground's own richness: one load at the hearth, better than two at the far edge, which is Orians and Pearson stated where it belongs and wants no constant at all.
+
+**Depletion is within a visit, not against the standing stock.** The easy wood goes first and a hauler who comes back tomorrow starts on the easy wood again. Keyed to the stock instead, every visit to worked ground is slower than the last -- and the near ring is always worked ground, so that is the same retune by the back door.
+
+**The decision was two ingredients short of its own premise, and the third was patch choice.** With the lift and the give-up rule both in, the distance bands did not move at all: near flow was unchanged and mid stayed within noise of zero, because `gather_source` weighed nothing but distance and nothing sent anybody out. What made the interior optimum real is choosing a patch by what the trip is worth an hour, in the same warmth currency the give-up rule uses. Measured from the hearth: **0.111 at four cells, 0.026 at seventeen, 0.016 at twenty-five, 0.028 at forty** -- the near ring beats everything while it stands, and once a walk is needed the best of it is not the shortest. That second fact is the interior optimum ADR 0016 asserted, and until this layer the code could not produce it.
+
+**The near ring had to be reserved from the chooser, and that was measured rather than assumed.** Letting the rate decide everywhere moves mid flow up by between one and twenty times, and costs ten to fifteen per cent of near flow, total flow with it, and shortens the runs: a hauler already out keeps working out, because a near patch fills a sack of one against a mid patch's three. Inside the old rim the colony takes the nearest of a kind exactly as it always did.
+
+**What did not arrive: far ground.** The far band is at zero on every world at every setting tried, and no rate at any distance beats the hearth's own ring. The near ring goes bare on all twenty-four worlds for wood and twenty-one for game, but only on a few per cent of decisions, and the colonies forced out more often die sooner -- a correlation of −0.36, real and moderate. So the interior optimum exists and the colony reaches it only under pressure, which is the honest state of this decision's promise.
+
+**Two call-site bugs, neither visible to the tests.** The give-up question was asked on the tick after the bite, which spent an hour of every trip on the question and cost twenty-seven per cent of the flow; and the hour count was read before it was reset, so the full first load of every visit came out as nothing. Both were found by diffing the behaviour stream against the previous build. The registry rule they extend: a unit test on a rule proves nothing about the argument the caller passes, nor about when the caller reads it.
+
+**The closing evidence, on the instrument that was pre-registered before the entertainers layer and re-run unchanged.** Twenty-four worlds, the same forty-five-by-year-forty bar, previous master against this layer: **six of twenty-four grew past forty-five before, five after**; median peak thirty-nine on both; mean peak 42.3 against 40.9; higher on four worlds, lower on five, equal on fifteen. **The labour wall did not move.** That is the second layer to say so on the same instrument, and this one adds the reason from the other side: at the tick of peak population the near ground still holds a median ninety per cent of its wood and ninety-three of its game. The colony stops growing with the resource still standing. The wall is hands.

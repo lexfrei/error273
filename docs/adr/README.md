@@ -19,6 +19,6 @@ Decisions that shaped error273, in the MADR-lite format: context, decision, cons
 - [0015. Stats are formed in childhood, not rolled at birth](0015-childhood-stat-formation.md) — proposed
 - [0016. The world has no edge](0016-unbounded-world.md) — proposed
 - [0017. Expeditions, the leash, and dying out of sight](0017-expeditions-and-the-leash.md) — proposed, amended
-- [0018. What a trip takes depends on the ground, and when to stop taking it](0018-richness-scaled-loads-and-the-give-up-rule.md) — proposed
+- [0018. What a trip takes depends on the ground, and when to stop taking it](0018-richness-scaled-loads-and-the-give-up-rule.md) — accepted, amended
 
 The design that these decisions were drawn from is in [../design.md](../design.md), and the sourced research behind it is in [../research/](../research/).
