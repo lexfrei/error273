@@ -2150,6 +2150,70 @@ impl Patches {
     /// a ring is abandoned the moment nothing in it could beat what is already
     /// found, and a chunk that says it holds none of that kind is passed over
     /// without being looked inside.
+    /// The patch of a kind worth the most an hour, walk included.
+    ///
+    /// The same search as `nearest` and the same bound on what it costs: rings
+    /// of chunks in turn, a ring abandoned once nothing in it could beat what is
+    /// already found, a chunk that holds none of the kind passed over without
+    /// being opened. What changed is the thing being maximised.
+    pub fn best(
+        &mut self,
+        kind: Cargo,
+        from: IVec2,
+        limit: i32,
+        effective: f32,
+        air: &Air,
+    ) -> Option<IVec2> {
+        let home = chunk_of(from);
+        let mut best: Option<(f32, i32, IVec2)> = None;
+        for ring in 0.. {
+            let chunks = chunk_ring(home, ring);
+            let floor = chunks
+                .iter()
+                .map(|chunk| box_distance(from, *chunk))
+                .min()
+                .unwrap_or(i32::MAX);
+            if floor > limit
+                || best.is_some_and(|(rate, _, _)| rate_ceiling(floor, effective) <= rate)
+            {
+                break;
+            }
+            for chunk in chunks {
+                let reach = box_distance(from, chunk);
+                if reach > limit
+                    || best.is_some_and(|(rate, _, _)| rate_ceiling(reach, effective) <= rate)
+                {
+                    continue;
+                }
+                if !self.has_been_to(chunk) || self.standing_in(chunk, kind) == 0 {
+                    continue;
+                }
+                let Some(held) = self.chunks.get(&key(chunk)) else {
+                    continue;
+                };
+                for patch in &held.patches {
+                    if patch.kind != kind || patch.amount == 0 {
+                        continue;
+                    }
+                    let walk = (patch.pos - from).abs().max_element();
+                    if walk > limit {
+                        continue;
+                    }
+                    let rate = trip_rate(from, patch.pos, effective, air);
+                    // Ties go to the nearer patch, and then to table order, so
+                    // the same colony always decides the same way.
+                    let better = best.is_none_or(|(found, near, _)| {
+                        rate > found || (rate == found && walk < near)
+                    });
+                    if better {
+                        best = Some((rate, walk, patch.pos));
+                    }
+                }
+            }
+        }
+        best.map(|(_, _, pos)| pos)
+    }
+
     pub fn nearest(&mut self, kind: Cargo, from: IVec2, limit: i32) -> Option<IVec2> {
         let home = chunk_of(from);
         let mut best: Option<(i32, IVec2)> = None;
@@ -3125,18 +3189,73 @@ pub fn haul_choice(current: Cargo, supply: Supply) -> Cargo {
     }
 }
 
-/// The nearest patch a citizen can work: their own kind if any still stands,
+/// Hours of work to fill a sack of `loads` full loads, given that every hour
+/// after the first gives less. Run out rather than approximated: it is a couple
+/// of dozen terms at most and being exact costs nothing.
+pub fn fill_hours(loads: f32) -> f32 {
+    let mut got = 0.0;
+    for hour in 0..64 {
+        if got >= loads {
+            return hour as f32;
+        }
+        got += visit_decay(hour);
+    }
+    64.0
+}
+
+/// What a trip to `p` would be worth an hour: the sack it fills against
+/// everything the trip spends -- the walk out, the walk home, the warmth that
+/// walk costs, and the hours of work in between.
+///
+/// One currency across the whole cycle. The colony already prices an hour in
+/// warmth to decide when to leave a patch; this decides which patch to walk to
+/// on the same number, so choosing, working and leaving cannot disagree.
+///
+/// There is no term for distance and no bonus for walking. Far ground wins here
+/// only when what it gives beats what the walk to it costs, which is the whole
+/// of the interior optimum: near patches are cheap to reach and small, far ones
+/// are rich and dear, and the best of them is somewhere in between.
+pub fn trip_rate(from: IVec2, p: IVec2, effective: f32, air: &Air) -> f32 {
+    let out = (p - from).abs().max_element() as f32;
+    let back = (p - CENTER).abs().max_element() as f32;
+    let hours = fill_hours(richness_at((p - CENTER).abs().max_element()));
+    let spent = out + back + cost_of_getting_home(p, air) + hours;
+    sack_at(p, effective) as f32 / spent.max(1.0)
+}
+
+/// The best a patch could possibly be worth at this reach, whatever it turns
+/// out to hold. Used to abandon a ring of chunks: richness stops rising, so the
+/// sack has a ceiling, and past some distance nothing can beat what is already
+/// found however rich it is.
+fn rate_ceiling(reach: i32, effective: f32) -> f32 {
+    let richest = CENTER + IVec2::new(RICHNESS_BEST, 0);
+    sack_at(richest, effective) as f32 / (reach as f32 + 1.0).max(1.0)
+}
+
+/// The patch a citizen should work: their own kind if any still stands,
 /// otherwise whatever is left, but only if the colony actually wants it.
 ///
 /// Own kind at any reach still beats the other kind close by, which is the rule
-/// the colony ran on before it had a horizon.
+/// the colony ran on before it had a horizon. Within a kind the choice is what
+/// the trip is worth an hour rather than what is nearest, which is the third
+/// thing an interior optimum needs: richer ground that fills a bigger sack is
+/// no use to a colony whose haulers cannot see past the first treeline.
 pub fn gather_source(
     patches: &mut Patches,
     want: Cargo,
     from: IVec2,
     take_other: bool,
+    effective: f32,
+    air: &Air,
 ) -> Option<(IVec2, Cargo)> {
-    if let Some(pos) = patches.nearest(want, from, SEARCH_LIMIT) {
+    // The near ring first and by distance alone, exactly as it always was: it
+    // is every colony's whole diet and no rule here may move it. Only once
+    // there is nothing standing inside the old rim does what a trip is worth
+    // an hour get to decide anything.
+    if let Some(pos) = patches.nearest(want, from, PATCH_RADIUS) {
+        return Some((pos, want));
+    }
+    if let Some(pos) = patches.best(want, from, SEARCH_LIMIT, effective, air) {
         return Some((pos, want));
     }
     // Falling back on a store the colony already has more than enough of buys
@@ -3145,7 +3264,8 @@ pub fn gather_source(
         return None;
     }
     patches
-        .nearest(want.other(), from, SEARCH_LIMIT)
+        .nearest(want.other(), from, PATCH_RADIUS)
+        .or_else(|| patches.best(want.other(), from, SEARCH_LIMIT, effective, air))
         .map(|pos| (pos, want.other()))
 }
 
@@ -4260,8 +4380,13 @@ pub fn assign_trades(
             .iter()
             .enumerate()
             .map(|(index, (_, at, experience))| {
-                let walk = gather_source(&mut patches, short, *at, false)
-                    .map_or(WALK_UNFOUND, |(cell, _)| (cell - *at).abs().max_element());
+                // How far the work is, which is a distance and not a choice
+                // of trip: what is being scored here is the candidate, and a
+                // candidate who would pick a richer patch further out is not a
+                // worse fit for the posting.
+                let walk = patches
+                    .nearest(short, *at, SEARCH_LIMIT)
+                    .map_or(WALK_UNFOUND, |cell| (cell - *at).abs().max_element());
                 (index, assignment_score(walk, *experience, bias))
             })
             .collect();
@@ -4662,11 +4787,22 @@ pub fn citizen_ai(
             }
         }
 
+        // What this citizen brings to the work decides both which patch is
+        // worth walking to and what comes out of it, so it is worked out once.
+        let raised = citizen.upbringing.stats().of(trade_stat(citizen.trade));
+        let effective = effective_stat(
+            raised,
+            focus_of(&citizen.needs),
+            fit,
+            ritual_lift(tick.0, colony.revels.lifted_until),
+        );
         let source = gather_source(
             &mut colony.patches,
             citizen.hauling,
             pos.0,
             supply.wants(citizen.hauling.other()),
+            effective,
+            air,
         );
         if duty == Duty::Gather
             && let Some((cell, kind)) = source
@@ -4675,13 +4811,6 @@ pub fn citizen_ai(
             // What a citizen lifts is decided here, where it comes out of the
             // ground, so that what leaves the patch is what reaches the store.
             // A bite rather than a load: the trip ends when the rule says so.
-            let raised = citizen.upbringing.stats().of(trade_stat(citizen.trade));
-            let effective = effective_stat(
-                raised,
-                focus_of(&citizen.needs),
-                fit,
-                ritual_lift(tick.0, colony.revels.lifted_until),
-            );
             let first = citizen.taking.is_none();
             let cost = tick_cost_at(cell, air);
             // Read as a value rather than off the citizen, so there is no
@@ -5823,12 +5952,29 @@ mod tests {
         ]);
         let from = CENTER;
         assert_eq!(
-            gather_source(&mut patches, Cargo::Wood, from, true),
+            gather_source(
+                &mut patches,
+                Cargo::Wood,
+                from,
+                true,
+                0.6,
+                &air(FULL_BURN_FUEL, 0)
+            ),
             Some((CENTER + IVec2::new(0, 4), Cargo::Food)),
             "a stripped forest sends the hauler after game instead"
         );
         patches.take(CENTER + IVec2::new(0, 4), 5);
-        assert_eq!(gather_source(&mut patches, Cargo::Wood, from, true), None);
+        assert_eq!(
+            gather_source(
+                &mut patches,
+                Cargo::Wood,
+                from,
+                true,
+                0.6,
+                &air(FULL_BURN_FUEL, 0)
+            ),
+            None
+        );
     }
 
     #[test]
@@ -5848,7 +5994,14 @@ mod tests {
             },
         ]);
         assert_eq!(
-            gather_source(&mut patches, Cargo::Wood, CENTER, true),
+            gather_source(
+                &mut patches,
+                Cargo::Wood,
+                CENTER,
+                true,
+                0.6,
+                &air(FULL_BURN_FUEL, 0)
+            ),
             Some((CENTER + IVec2::new(9, 0), Cargo::Wood)),
             "the nearer patch of the wrong kind does not win"
         );
@@ -6860,9 +7013,26 @@ mod tests {
                 cap: 5,
             },
         ]);
-        assert!(gather_source(&mut patches, Cargo::Wood, CENTER, true).is_some());
+        assert!(
+            gather_source(
+                &mut patches,
+                Cargo::Wood,
+                CENTER,
+                true,
+                0.6,
+                &air(FULL_BURN_FUEL, 0)
+            )
+            .is_some()
+        );
         assert_eq!(
-            gather_source(&mut patches, Cargo::Wood, CENTER, false),
+            gather_source(
+                &mut patches,
+                Cargo::Wood,
+                CENTER,
+                false,
+                0.6,
+                &air(FULL_BURN_FUEL, 0)
+            ),
             None,
             "with the granary already over target, going out for more buys nothing"
         );
@@ -7704,6 +7874,61 @@ mod tests {
     }
 
     #[test]
+    fn nothing_is_ever_worth_walking_past_the_near_ring_for_while_it_stands() {
+        // The cliff rule, as a property rather than a hope: the ground the
+        // colony lives off is chosen exactly as `nearest` chose it, because no
+        // distance can pay for itself while there is anything standing close.
+        let lit = air(FULL_BURN_FUEL, 0);
+        let near = trip_rate(CENTER, CENTER + IVec2::new(4, 0), 0.6, &lit);
+        for out in [25, 40, 60, 90, 120, 150, RICHNESS_BEST, 250] {
+            let far = trip_rate(CENTER, CENTER + IVec2::new(out, 0), 0.6, &lit);
+            assert!(
+                near > far,
+                "a patch at {out} cells beat one at four: {far} against {near}"
+            );
+        }
+    }
+
+    #[test]
+    fn once_a_walk_is_needed_the_best_of_it_is_not_the_shortest() {
+        // The interior optimum, which ADR 0016 asserted and the code could not
+        // produce until a trip's worth depended on the ground. Given that the
+        // near ring is bare and somebody has to walk, the best patch to walk to
+        // is not the first one they come to.
+        let lit = air(FULL_BURN_FUEL, 0);
+        let close = trip_rate(CENTER, CENTER + IVec2::new(25, 0), 0.6, &lit);
+        let further = trip_rate(CENTER, CENTER + IVec2::new(40, 0), 0.6, &lit);
+        assert!(
+            further > close,
+            "the nearer of two walks won: {close} against {further}"
+        );
+    }
+
+    #[test]
+    fn a_trip_is_worth_less_the_further_it_goes_for_the_same_ground() {
+        // No term for distance and no bonus for walking: hold the ground equal
+        // and the walk can only cost.
+        let lit = air(FULL_BURN_FUEL, 0);
+        let patch = CENTER + IVec2::new(60, 0);
+        let close = trip_rate(CENTER + IVec2::new(55, 0), patch, 0.6, &lit);
+        let far = trip_rate(CENTER + IVec2::new(20, 0), patch, 0.6, &lit);
+        assert!(close > far, "{close} against {far}");
+    }
+
+    #[test]
+    fn filling_a_bigger_sack_takes_longer() {
+        assert_eq!(fill_hours(0.0), 0.0);
+        assert_eq!(fill_hours(1.0), 1.0, "the first hour is a full load");
+        let mut previous = 0.0;
+        for tenth in 0..=40 {
+            let hours = fill_hours(tenth as f32 / 10.0);
+            assert!(hours >= previous, "a step at {tenth}");
+            previous = hours;
+        }
+        assert!(fill_hours(3.0) > fill_hours(1.0));
+    }
+
+    #[test]
     fn a_sack_is_one_load_at_the_hearth_and_bigger_the_further_out_it_is_filled() {
         for effective in [0.0, 0.6, 1.4, FIT_CEILING] {
             let near = CENTER + IVec2::new(4, 0);
@@ -8469,8 +8694,15 @@ mod tests {
             let all = standing(&mut world, *cell);
             world.take(*cell, all);
         }
-        let found = gather_source(&mut world, Cargo::Wood, CENTER, true)
-            .expect("a bare near ring must send a citizen further, not idle them");
+        let found = gather_source(
+            &mut world,
+            Cargo::Wood,
+            CENTER,
+            true,
+            0.6,
+            &air(FULL_BURN_FUEL, 0),
+        )
+        .expect("a bare near ring must send a citizen further, not idle them");
         let out = (found.0 - CENTER).abs().max_element();
         assert!(out > NEAR_GROUND, "it found something at {out}");
         assert!(out <= SEARCH_LIMIT, "but not past where anybody would walk");
