@@ -440,6 +440,23 @@ pub const PERFORMANCE_CALL: u64 = 8;
 /// reader. This is the one place anything about the colony's spirits reaches
 /// what its hours are worth.
 pub const RITUAL_LIFT: f32 = 0.1;
+/// Below this a kind is fresh and costs a night nothing.
+pub const MONOTONY_FRESH: f32 = 30.0;
+/// At this and above, a kind has been heard as often as it can be: the night is
+/// worth the least it can be worth and no less.
+pub const MONOTONY_STALE: f32 = 50.0;
+/// The most of a night's gain that having heard it all before can take. A third
+/// of it survives however tired of it the colony is, because a night that is
+/// worth nothing at all is a night nobody would sit through, and the mechanic
+/// would be a chore rather than a pressure.
+pub const TOLERANCE_CAP: f32 = 2.0 / 3.0;
+/// What one night of a kind adds to how tired of it a colony at its target
+/// stores is. A colony short of those tires more slowly, which is the whole of
+/// how variety scales with prosperity: nobody scraping by minds hearing the
+/// same song again.
+pub const MONOTONY_PER_NIGHT: f32 = 25.0;
+/// What a night off from a kind takes back off it.
+pub const MONOTONY_FADE: f32 = 8.0;
 pub const FIT_FLOOR: f32 = 0.5;
 pub const FIT_STAT: f32 = 0.6;
 pub const FIT_PRACTICE: f32 = 0.5;
@@ -990,6 +1007,59 @@ pub fn performance_quality(audience: usize, warmth: f32, performer: f32, traditi
         + performer.clamp(0.0, 1.0) * QUALITY_PERFORMER
         + tradition.clamp(0.0, 1.0) * QUALITY_TRADITION)
         .clamp(0.0, 1.0)
+}
+
+/// What an evening actually is. Two of them, because one is not a choice and
+/// the pressure this exists to make needs somewhere for a colony to turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Song,
+    Story,
+}
+
+pub const KIND_COUNT: usize = 2;
+pub const KINDS: [Kind; KIND_COUNT] = [Kind::Song, Kind::Story];
+
+impl Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Song => "song",
+            Kind::Story => "story",
+        }
+    }
+}
+
+/// How much more tired of a kind the colony is for having just heard it. What
+/// it costs is set by how well the colony is doing: at its target stores a
+/// night of the same thing lands in full, and a colony at half of them tires at
+/// half the rate, which is the whole of how variety scales with prosperity.
+pub fn monotony_rise(level: f32, prosperity: f32) -> f32 {
+    (level + MONOTONY_PER_NIGHT * prosperity.clamp(0.0, 1.0)).clamp(0.0, MONOTONY_STALE)
+}
+
+/// What a night takes back off every kind before tonight's is chosen, so a kind
+/// left alone comes back to being worth hearing.
+pub fn monotony_fade(level: f32) -> f32 {
+    (level - MONOTONY_FADE).clamp(0.0, MONOTONY_STALE)
+}
+
+/// How much of a night's gain having heard it before takes: nothing while the
+/// kind is still fresh, the whole of the cap once it is stale, and a straight
+/// ramp between the two marks.
+pub fn tolerance_of(level: f32) -> f32 {
+    let through = ((level - MONOTONY_FRESH) / (MONOTONY_STALE - MONOTONY_FRESH)).clamp(0.0, 1.0);
+    through * TOLERANCE_CAP
+}
+
+/// Which kind tonight is. A performer is not stupid: they do the one the colony
+/// has heard less of lately, so monotony only bites a colony that is holding
+/// performances faster than two kinds can carry.
+pub fn fresher_kind(monotony: [f32; KIND_COUNT]) -> Kind {
+    if monotony[Kind::Story as usize] < monotony[Kind::Song as usize] {
+        Kind::Story
+    } else {
+        Kind::Song
+    }
 }
 
 /// How a night went.
@@ -3820,6 +3890,11 @@ pub fn send_scouts(
 #[derive(Resource)]
 pub struct Revels {
     pub last: Outcome,
+    /// What the last night was, so the watcher can see the colony running out
+    /// of things to put on.
+    pub kind: Kind,
+    /// How tired of each kind the colony is.
+    pub monotony: [f32; KIND_COUNT],
     /// When the lift a good night left the colony runs out. A second good night
     /// inside the window moves this to the later expiry and no further: two
     /// evenings in a week are a longer good week, not a faster one. Without
@@ -3849,6 +3924,8 @@ impl Default for Revels {
     fn default() -> Self {
         Self {
             last: Outcome::Boring,
+            kind: Kind::Song,
+            monotony: [0.0; KIND_COUNT],
             lifted_until: 0,
         }
     }
@@ -3864,11 +3941,24 @@ impl Default for Revels {
 pub fn perform(
     tick: Res<Tick>,
     air: Res<Air>,
+    stores: Stores,
     mut revels: ResMut<Revels>,
     mut citizens: Query<(&Pos, &mut Citizen)>,
 ) {
     if tick.0 % ticks_per_day() != PERFORMANCE_HOUR * TICKS_PER_HOUR {
         return;
+    }
+    // What the colony can afford to be choosy about. Both stores, because being
+    // fed and being warm are not interchangeable and the scarcer one is what
+    // the colony actually feels.
+    let mouths = citizens.iter().count();
+    let prosperity = stock_share(stores.generator.fuel, FUEL_PER_CITIZEN, mouths).min(stock_share(
+        stores.granary.food,
+        FOOD_PER_CITIZEN,
+        mouths,
+    ));
+    for kind in KINDS {
+        revels.monotony[kind as usize] = monotony_fade(revels.monotony[kind as usize]);
     }
     let stages: Vec<(IVec2, f32, u64)> = citizens
         .iter()
@@ -3896,14 +3986,18 @@ pub fn perform(
         // The tradition term is nothing until a colony has traditions.
         let quality = performance_quality(audience.len(), warmth, performer, 0.0);
         let outcome = performance_outcome(quality, WORLD_SEED, tick.0 ^ seed);
+        let kind = fresher_kind(revels.monotony);
+        let heard_before = tolerance_of(revels.monotony[kind as usize]);
         let cheered_until = tick.0 + outcome.good_days() * ticks_per_day();
         revels.lifted_until = lift_after(revels.lifted_until, outcome, tick.0);
         revels.last = outcome;
+        revels.kind = kind;
+        revels.monotony[kind as usize] = monotony_rise(revels.monotony[kind as usize], prosperity);
         for (pos, mut citizen) in &mut citizens {
             if (pos.0 - stage).abs().max_element() > PERFORMANCE_REACH || air.heat_at(pos.0) < 0.0 {
                 continue;
             }
-            citizen.needs.amuse(outcome.worth());
+            citizen.needs.amuse(outcome.worth() * (1.0 - heard_before));
             if outcome.went_well() {
                 citizen.cheered_until = citizen.cheered_until.max(cheered_until);
             }
@@ -5095,6 +5189,110 @@ mod tests {
             ),
             home,
             "once it is out, the only shelter left is their own roof"
+        );
+    }
+
+    #[test]
+    fn hearing_it_again_costs_a_night_some_of_its_worth_and_never_all() {
+        assert_eq!(tolerance_of(0.0), 0.0, "a kind nobody has heard lately");
+        assert_eq!(
+            tolerance_of(MONOTONY_FRESH),
+            0.0,
+            "and one still inside the fresh mark"
+        );
+        assert_eq!(tolerance_of(MONOTONY_STALE), TOLERANCE_CAP);
+        let halfway = tolerance_of((MONOTONY_FRESH + MONOTONY_STALE) / 2.0);
+        assert!(
+            halfway > 0.0 && halfway < TOLERANCE_CAP,
+            "a ramp, not a step"
+        );
+        let worst = Outcome::Unforgettable.worth() * (1.0 - tolerance_of(MONOTONY_STALE));
+        assert!(
+            worst > 0.0,
+            "the most tired colony still gets something out of the best night"
+        );
+    }
+
+    #[test]
+    fn a_colony_scraping_by_does_not_tire_of_anything() {
+        assert_eq!(
+            monotony_rise(10.0, 0.0),
+            10.0,
+            "nobody with nothing minds hearing the same song again"
+        );
+        assert_eq!(monotony_rise(0.0, 1.0), MONOTONY_PER_NIGHT);
+        assert_eq!(monotony_rise(0.0, 0.5), MONOTONY_PER_NIGHT / 2.0);
+        assert_eq!(
+            monotony_rise(0.0, 4.0),
+            MONOTONY_PER_NIGHT,
+            "and being four times over target is not four times as choosy"
+        );
+        assert_eq!(
+            monotony_rise(MONOTONY_STALE, 1.0),
+            MONOTONY_STALE,
+            "tired of it is as tired of it as a colony gets"
+        );
+    }
+
+    #[test]
+    fn a_kind_left_alone_is_worth_hearing_again() {
+        assert_eq!(
+            monotony_fade(MONOTONY_STALE),
+            MONOTONY_STALE - MONOTONY_FADE
+        );
+        assert_eq!(monotony_fade(0.0), 0.0);
+        let mut level = MONOTONY_STALE;
+        let mut nights = 0;
+        while tolerance_of(level) > 0.0 && nights < 100 {
+            level = monotony_fade(level);
+            nights += 1;
+        }
+        assert!(
+            nights < 100,
+            "a kind put away comes back rather than staying spent"
+        );
+    }
+
+    #[test]
+    fn a_performer_does_the_thing_the_colony_has_heard_less_of() {
+        assert_eq!(
+            fresher_kind([0.0, 0.0]),
+            Kind::Song,
+            "ties go to table order"
+        );
+        let mut monotony = [0.0; KIND_COUNT];
+        monotony[Kind::Song as usize] = MONOTONY_STALE;
+        assert_eq!(fresher_kind(monotony), Kind::Story);
+        let mut both = [MONOTONY_STALE; KIND_COUNT];
+        both[Kind::Story as usize] = MONOTONY_STALE - 1.0;
+        assert_eq!(
+            fresher_kind(both),
+            Kind::Story,
+            "and with everything stale, the less stale of them"
+        );
+    }
+
+    #[test]
+    fn two_kinds_carry_a_colony_that_is_not_holding_them_nightly() {
+        // A night of one, a night of the other, at full prosperity: the pair
+        // alternates without either reaching the mark where it starts to cost.
+        let mut monotony = [0.0; KIND_COUNT];
+        let mut worst = 0.0f32;
+        for _ in 0..40 {
+            for level in &mut monotony {
+                *level = monotony_fade(*level);
+            }
+            let kind = fresher_kind(monotony);
+            worst = worst.max(tolerance_of(monotony[kind as usize]));
+            monotony[kind as usize] = monotony_rise(monotony[kind as usize], 1.0);
+        }
+        assert!(
+            worst > 0.0,
+            "a colony performing every night does run into it"
+        );
+        assert!(
+            worst < TOLERANCE_CAP,
+            "but two kinds keep it off the floor, which is what a second kind is for"
         );
     }
 

@@ -70,6 +70,9 @@ pub struct Status {
     pub mood: f32,
     /// How the last performance went, in the colony's own word.
     pub revel: &'static str,
+    /// What that night was, which is what a colony running out of things to put
+    /// on looks like from the outside.
+    pub revel_kind: &'static str,
     /// One citizen, described the way the colony would describe them.
     pub card: Option<CitizenCard>,
 }
@@ -155,7 +158,7 @@ pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
             votes.join("/")
         ),
         format!(
-            "under {:<2} {:3}  grown {:3}  over {:<2} {:3}  couples {:3}  raised {}  mood {:3.0}  night {}",
+            "under {:<2} {:3}  grown {:3}  over {:<2} {:3}  couples {:3}  raised {}  mood {:3.0}  night {} {}",
             ADULT_AGE as u32,
             children,
             status.alive.saturating_sub(children + frail),
@@ -168,6 +171,7 @@ pub fn status_lines(status: &Status) -> [String; STATUS_LINES] {
                 .collect::<Vec<String>>()
                 .join("/"),
             status.mood,
+            status.revel_kind,
             status.revel
         ),
         match &status.card {
@@ -251,6 +255,7 @@ mod tests {
             stats: [0.5; STAT_COUNT],
             mood: MOOD_BASE,
             revel: "fun",
+            revel_kind: "song",
             card: Some(CitizenCard {
                 seed: 1,
                 age: 30.0,
@@ -285,6 +290,7 @@ mod tests {
             // which one a sample caught is not a label.
             project: Some((Building::House, 3)),
             revel: "boring",
+            revel_kind: "story",
             card: shown.card.as_ref().map(|card| CitizenCard {
                 focus: Focus::BadlyDistracted,
                 held: [false; THOUGHT_COUNT],

@@ -91,6 +91,7 @@ pub fn print_status(
         stats,
         mood,
         revel: revels.last.name(),
+        revel_kind: revels.kind.name(),
         card,
     };
     for line in status_lines(&status) {
