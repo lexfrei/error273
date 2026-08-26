@@ -7873,6 +7873,163 @@ mod tests {
         (taken, cap - amount)
     }
 
+    // The corridor arithmetic. It decides nothing in the colony -- no system
+    // calls it -- and it lives here because a derivation whose answer is "do
+    // not build this" is a claim about the constants, and a claim about the
+    // constants belongs where it is re-checked every time they move.
+
+    /// How many lit posts a chain needs to carry warmth out to `distance`.
+    ///
+    /// The rule the chain is built under is that links stand closer together than
+    /// the warmth between them: two posts whose discs do not touch leave a cold gap
+    /// that a hauler crosses unwarmed, which is the thing a corridor exists to
+    /// stop. So the spacing is twice a post's reach, and the count follows from the
+    /// distance rather than from a number anybody chose.
+    fn links_to(distance: i32, output: f32, ambient: f32) -> u32 {
+        let reach = Fire { at: CENTER, output }.reach(ambient);
+        let hearth = Fire {
+            at: CENTER,
+            output: GENERATOR_HEAT,
+        }
+        .reach(ambient);
+        let gap = (distance as f32 - hearth).max(0.0);
+        if gap == 0.0 {
+            return 0;
+        }
+        if reach <= 0.0 {
+            return u32::MAX;
+        }
+        (gap / (2.0 * reach)).ceil() as u32
+    }
+
+    /// What a post would have to put out for links a given distance apart to chain
+    /// at all: their discs must touch, so a post's reach is half the spacing.
+    ///
+    /// The colony's two waystation numbers do not currently satisfy this and the
+    /// tests say so. It is kept as arithmetic rather than applied, because the
+    /// corridor cannot pay for itself whichever way the two are made to agree.
+    fn heat_for_step(step: f32, ambient: f32) -> f32 {
+        step / 2.0 * HEAT_FALLOFF - ambient
+    }
+
+    /// What a lit chain costs the colony a day, in wood. A post burns whether
+    /// anybody is out there or not, which is most of why the arithmetic below comes
+    /// out the way it does.
+    fn corridor_cost(links: u32) -> f32 {
+        links as f32 * ticks_per_day() as f32 / WAYSTATION_BURN_EVERY as f32
+    }
+
+    /// How many haulers have to be working past a corridor for it to pay for
+    /// itself: what it costs a day against what one hauler gains a day by making
+    /// the same trip warm rather than cold.
+    fn corridor_break_even(distance: i32, output: f32, effective: f32, ambient: f32) -> f32 {
+        let at = CENTER + IVec2::new(distance, 0);
+        let cold = Air {
+            fires: vec![Fire {
+                at: CENTER,
+                output: GENERATOR_HEAT,
+            }],
+            ambient,
+        };
+        let links = links_to(distance, output, ambient);
+        let mut lit = cold.clone();
+        let hearth = Fire {
+            at: CENTER,
+            output: GENERATOR_HEAT,
+        }
+        .reach(ambient);
+        for link in 1..=links {
+            let along =
+                hearth + (link as f32 - 0.5) * 2.0 * Fire { at: CENTER, output }.reach(ambient);
+            lit.fires.push(Fire {
+                at: CENTER + IVec2::new(along.round() as i32, 0),
+                output,
+            });
+        }
+        let gain = (trip_rate(CENTER, at, effective, &lit)
+            - trip_rate(CENTER, at, effective, &cold))
+            * ticks_per_day() as f32;
+        if gain <= 0.0 {
+            return f32::INFINITY;
+        }
+        corridor_cost(links) / gain
+    }
+
+    #[test]
+    fn a_chain_of_posts_does_not_reach_from_one_link_to_the_next() {
+        // The rule a corridor is built under is that links stand closer
+        // together than the warmth between them. The colony's own two numbers
+        // do not: a post is sited up to a step away from the warmth that feeds
+        // it, and its disc is a fraction of that, so what gets built is a
+        // string of separate braziers with cold between them.
+        let reach = Fire {
+            at: CENTER,
+            output: WAYSTATION_HEAT,
+        }
+        .reach(AMBIENT_MEAN);
+        assert!(
+            WAYSTATION_STEP > 2.0 * reach,
+            "the gap is closed and this test is stale: step {WAYSTATION_STEP} against {reach}"
+        );
+        // What it would take to close it, which is more than the hearth itself
+        // puts out -- a brazier that outshines the generator is not a brazier.
+        let needed = heat_for_step(WAYSTATION_STEP, AMBIENT_MEAN);
+        assert!(needed > GENERATOR_HEAT, "{needed} against {GENERATOR_HEAT}");
+    }
+
+    #[test]
+    fn a_corridor_cannot_pay_for_itself() {
+        // The derivation this layer was asked for, as a test rather than a
+        // paragraph: what a lit chain costs a day against what one hauler gains
+        // a day by making the same trip warm rather than cold. The answer is
+        // counted in haulers, and the colony does not have them.
+        for out in [30, 40, 60, 90, 120, RICHNESS_BEST] {
+            let haulers = corridor_break_even(out, WAYSTATION_HEAT, 0.6, AMBIENT_MEAN);
+            assert!(
+                haulers > CITIZENS as f32,
+                "a corridor to {out} cells pays at {haulers} haulers, which the colony has"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hotter_brazier_does_not_rescue_the_corridor() {
+        // Raising the output shortens the chain, and in this model a post burns
+        // the same whatever it puts out, so this is as generous to corridors as
+        // the arithmetic can be made. It still does not pay: the cheapest
+        // corner of it wants a third of the founding party permanently working
+        // past the last link, and the far bands say the colony never has more
+        // than a handful out there at once.
+        let mut best = f32::INFINITY;
+        for out in [30, 40, 60, 90, 120, RICHNESS_BEST] {
+            for heat in [60.0, 86.0, 120.0, 200.0] {
+                best = best.min(corridor_break_even(out, heat, 0.6, AMBIENT_MEAN));
+            }
+        }
+        assert!(
+            best > CITIZENS as f32 / 3.0,
+            "the corridor became affordable at {best} haulers"
+        );
+    }
+
+    #[test]
+    fn a_chain_is_counted_from_the_ground_it_has_to_cross() {
+        assert_eq!(
+            links_to(10, WAYSTATION_HEAT, AMBIENT_MEAN),
+            0,
+            "ground the hearth already reaches wants no post"
+        );
+        let near = links_to(40, WAYSTATION_HEAT, AMBIENT_MEAN);
+        let far = links_to(120, WAYSTATION_HEAT, AMBIENT_MEAN);
+        assert!(far > near, "{far} against {near}");
+        assert!(
+            links_to(120, 200.0, AMBIENT_MEAN) < far,
+            "a hotter post covers the same ground in fewer links"
+        );
+        assert_eq!(corridor_cost(0), 0.0);
+        assert!(corridor_cost(3) > corridor_cost(1));
+    }
+
     #[test]
     fn nothing_is_ever_worth_walking_past_the_near_ring_for_while_it_stands() {
         // The cliff rule, as a property rather than a hope: the ground the
