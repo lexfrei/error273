@@ -12,7 +12,7 @@ default = ["window"]
 window = ["bevy/default_platform", "bevy/2d_bevy_render"]
 
 [dependencies]
-bevy = { version = "0.19", default-features = false, features = ["default_app"] }
+bevy = { version = "0.20", default-features = false, features = ["default_app"] }
 
 [profile.dev]
 opt-level = 1
