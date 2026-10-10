@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "local>lexfrei/renovate-config"
-  ]
+  "extends": ["github>lexfrei/renovate-config"],
+  "description": "This repository has no CI. Renovate waits for a passing check before it automerges, so without ignoreTests every update sits green-but-unmerged forever.",
+  "ignoreTests": true
 }
